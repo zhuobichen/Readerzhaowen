@@ -1,5 +1,5 @@
 // app.js — 入口与路由
-import { initBookshelf, refreshShelf } from './bookshelf.js';
+import { initBookshelf, refreshShelf, refreshCategories } from './bookshelf.js';
 import { Reader } from './reader.js';
 import Notes from './notes.js';
 import AI from './ai.js';
@@ -72,6 +72,7 @@ async function handleUpload(files) {
   }
   if (ok > 0) {
     refreshShelf();
+    refreshCategories();
   }
   if (fail > 0) {
     alert(`导入完成：成功 ${ok} 本，失败 ${fail} 本`);

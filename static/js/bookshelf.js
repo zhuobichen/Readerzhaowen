@@ -1,5 +1,5 @@
 // bookshelf.js — 书架视图：网格、懒加载封面、搜索/筛选/排序
-import API, { humanSize } from './api.js';
+import API from './api.js';
 import { CoverStore, makePlaceholderCover } from './store.js';
 
 let allBooks = [];
@@ -105,7 +105,7 @@ function renderSidebar() {
 function renderCatItem(label, cat, count, active) {
   return `<div class="cat-item${active ? ' active' : ''}" data-cat="${escapeHtml(cat)}" title="${escapeHtml(label)}">
     <span class="cat-name">${escapeHtml(label)}</span>
-    <span class="cat-badge">${count}</span>
+    <span class="cat-count">${count}</span>
   </div>`;
 }
 
@@ -290,6 +290,76 @@ function openBook(b) {
   location.hash = `#/book/${encodeURIComponent(b.id)}`;
 }
 
+// ---- 右键上下文菜单 ----
+function showContextMenu(x, y, book) {
+  closeMenus();
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  menu.id = 'ctx-menu-active';
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  menu.innerHTML = `
+    <button data-act="cat">设置分类</button>
+    <hr>
+    <button class="ctx-danger" data-act="del">删除书籍</button>`;
+  menu.querySelector('[data-act="cat"]').addEventListener('click', () => {
+    closeMenus();
+    const r = menu.getBoundingClientRect();
+    showCategoryPicker(r.left, r.bottom + 4, book);
+  });
+  menu.querySelector('[data-act="del"]').addEventListener('click', async () => {
+    closeMenus();
+    if (!confirm(`确定删除《${book.title || book.name}》？\n文件将被永久移除。`)) return;
+    try {
+      await API.deleteBook(book.id);
+      load();
+    } catch (e) {
+      alert(e.message || '删除失败');
+    }
+  });
+  document.body.appendChild(menu);
+  // 越界修正
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+}
+
+// ---- 分类选择器 ----
+async function showCategoryPicker(x, y, book) {
+  closeMenus();
+  let cats = [];
+  try { cats = await API.getCategories(); } catch {}
+  const picker = document.createElement('div');
+  picker.className = 'cat-picker';
+  picker.id = 'ctx-menu-active';
+  picker.style.left = x + 'px';
+  picker.style.top = y + 'px';
+  let html = cats.map(c => `<button data-cat="${escapeHtml(c.name)}">${escapeHtml(c.name)}</button>`).join('');
+  html += '<hr style="border:none;border-top:1px solid var(--line);margin:4px 0;">';
+  html += '<button data-cat="" style="color:var(--text-mute);">移除分类</button>';
+  picker.innerHTML = html;
+  picker.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const cat = btn.dataset.cat;
+      closeMenus();
+      try {
+        await API.setCategory(book.id, cat);
+        load();
+      } catch (e) {
+        alert(e.message || '设置分类失败');
+      }
+    });
+  });
+  document.body.appendChild(picker);
+  const rect = picker.getBoundingClientRect();
+  if (rect.right > window.innerWidth) picker.style.left = (window.innerWidth - rect.width - 10) + 'px';
+  if (rect.bottom > window.innerHeight) picker.style.top = (window.innerHeight - rect.height - 10) + 'px';
+}
+
+function closeMenus() {
+  document.querySelectorAll('#ctx-menu-active').forEach(el => el.remove());
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -301,10 +371,14 @@ function bind() {
   el.sort.addEventListener('change', render);
   document.getElementById('btn-refresh').addEventListener('click', load);
   document.getElementById('btn-empty-refresh').addEventListener('click', load);
+  // 点击空白关闭菜单
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#ctx-menu-active')) closeMenus();
+  });
 }
 
 export function initBookshelf() {
   bind();
   load();
 }
-export { load as refreshShelf };
+export { load as refreshShelf, refreshCategories };
