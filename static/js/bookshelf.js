@@ -103,7 +103,7 @@ function renderSidebar() {
 }
 
 function renderCatItem(label, cat, count, active) {
-  return `<div class="cat-item${active ? ' active' : ''}" data-cat="${escapeAttr(cat)}" title="${escapeAttr(label)}">
+  return `<div class="cat-item${active ? ' active' : ''}" data-cat="${escapeHtml(cat)}" title="${escapeHtml(label)}">
     <span class="cat-name">${escapeHtml(label)}</span>
     <span class="cat-badge">${count}</span>
   </div>`;
@@ -173,7 +173,7 @@ function render() {
       <div class="book-meta">
         <div class="book-title">${escapeHtml(b.title || b.name)}</div>
         ${b.author ? `<div class="book-author">${escapeHtml(b.author)}</div>` : ''}
-        ${b.category ? `<div class="book-cat" data-cat="${escapeAttr(b.category)}"><span class="book-cat-tag">${escapeHtml(b.category)}</span></div>` : ''}
+        ${b.category ? `<div class="book-cat" data-cat="${escapeHtml(b.category)}"><span class="book-cat-tag">${escapeHtml(b.category)}</span></div>` : ''}
       </div>`;
     card.querySelector('.cp-title').textContent = b.title || b.name;
     // 占位色板先填上，避免纯灰
