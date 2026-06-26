@@ -194,15 +194,111 @@ def make_tool_result(ok, data=None, error="", retryable=False):
     return {"ok": bool(ok), "data": data, "error": error, "retryable": bool(retryable)}
 
 
+# ---- 0. TokenEstimator ----
+class TokenEstimator:
+    """粗略估算 token 数 (中文≈1.5字/token, 英文≈4字/token)"""
+
+    @staticmethod
+    def estimate(text):
+        if not text:
+            return 0
+        text = str(text)
+        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+        other_chars = len(text) - chinese_chars
+        return int(chinese_chars * 1.5 + other_chars / 4)
+
+    @staticmethod
+    def estimate_messages(messages):
+        total = 0
+        for m in messages:
+            total += TokenEstimator.estimate(m.get("content", ""))
+            if m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    total += TokenEstimator.estimate(json.dumps(tc, ensure_ascii=False))
+        return total
+
+
+# ---- 0b. ContextCompressor ----
+class ContextCompressor:
+    """上下文压缩: 当消息历史超 token 预算时, 调 LLM 生成摘要替换旧消息"""
+
+    TOKEN_BUDGET = 12000       # 总 token 预算 (留给模型回复空间)
+    SUMMARY_THRESHOLD = 8000  # 超过此值触发压缩
+    KEEP_RECENT = 6            # 压缩时保留最近 N 条消息
+    KEEP_SYSTEM = True        # 保留 system 消息
+
+    def __init__(self, config):
+        self.config = config
+
+    def should_compress(self, messages):
+        """检查是否需要压缩"""
+        return TokenEstimator.estimate_messages(messages) > self.SUMMARY_THRESHOLD
+
+    def compress(self, messages):
+        """压缩消息历史: 保留 system + 最近 N 条, 中间部分生成摘要"""
+        if not self.should_compress(messages):
+            return messages
+
+        # 分离 system 消息
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        non_system = [m for m in messages if m.get("role") != "system"]
+
+        if len(non_system) <= self.KEEP_RECENT:
+            return messages
+
+        # 要压缩的部分
+        to_compress = non_system[:-self.KEEP_RECENT]
+        keep_recent = non_system[-self.KEEP_RECENT:]
+
+        # 构建摘要请求
+        summary_prompt = self._build_summary_prompt(to_compress)
+        summary = self._generate_summary(summary_prompt)
+
+        if summary:
+            summary_msg = {
+                "role": "system",
+                "content": "[对话摘要] 以下是之前对话的要点:\n{}".format(summary),
+            }
+            return system_msgs + [summary_msg] + keep_recent
+        else:
+            # 摘要失败, 降级为简单裁剪
+            note = {"role": "system",
+                    "content": "[历史已裁剪] 之前 {} 条消息已省略".format(len(to_compress))}
+            return system_msgs + [note] + keep_recent
+
+    def _build_summary_prompt(self, messages):
+        lines = []
+        for m in messages:
+            role = m.get("role", "unknown")
+            content = m.get("content", "")
+            if m.get("tool_calls"):
+                content = "[调用了工具: {}]".format(
+                    ", ".join(tc.get("function", {}).get("name", "") for tc in m["tool_calls"]))
+            lines.append("{}: {}".format(role, content[:500]))
+        return ("请用中文将以下对话摘要为 200 字以内的要点, "
+                "保留关键信息和工具调用结果:\n\n" + "\n".join(lines))
+
+    def _generate_summary(self, prompt):
+        """调用 LLM 生成摘要"""
+        try:
+            resp = call_llm_api(self.config, [{"role": "user", "content": prompt}])
+            if "error" not in resp:
+                return resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+        except Exception:
+            pass
+        return None
+
+
 # ---- 1. MemoryManager ----
 class MemoryManager:
-    """长期记忆 (data/agent_memory.json) + 短期记忆 (按会话 in-memory)"""
+    """长期记忆 (data/agent_memory.json) + 短期记忆 (按会话 in-memory) + 会话摘要 (持久化)"""
 
     _DEFAULT = {
         "profile": {"language": "zh"},
         "preferences": {"summaryStyle": "detailed", "outputLanguage": "zh"},
         "readingHabits": {"favoriteTopics": [], "frequentlyReadBooks": []},
         "stableFacts": [],  # [{id, content, type, confidence, source, createdAt, updatedAt}]
+        "sessionSummaries": {},  # {session_id: summary_string} 持久化
     }
 
     SHORT_TERM_MAX = 20   # 单个会话最大短时消息数
@@ -211,7 +307,12 @@ class MemoryManager:
     def __init__(self):
         self._memory = {}
         self._short_term = {}  # session_id -> [messages]
+        self._config = None    # 由外部 set_config 注入, 供 ContextCompressor 使用
         self.load_memory()
+
+    def set_config(self, config):
+        """注入 AI 配置, 使 _summarize_old 能调用 LLM 生成摘要"""
+        self._config = config
 
     # ---- 长期记忆 ----
     def load_memory(self):
@@ -274,6 +375,16 @@ class MemoryManager:
             relevant = list(facts)
         return relevant
 
+    # ---- 会话摘要 (持久化到 agent_memory.json) ----
+    def get_session_summary(self, session_id):
+        summaries = self._memory.get("sessionSummaries", {})
+        return summaries.get(session_id, "")
+
+    def set_session_summary(self, session_id, summary):
+        summaries = self._memory.setdefault("sessionSummaries", {})
+        summaries[session_id] = summary
+        self.save_memory()
+
     # ---- 短期记忆 ----
     def get_short_term(self, session_id):
         return self._short_term.get(session_id, [])
@@ -285,10 +396,31 @@ class MemoryManager:
             self._summarize_old(session_id)
 
     def _summarize_old(self, session_id):
-        """超出上限时压缩较早的消息 (保留首条 + 最近 N 条)"""
+        """超出上限时通过 ContextCompressor 生成摘要压缩较早的消息 (保留 system + 最近 N 条)"""
         msgs = self._short_term.get(session_id, [])
         if len(msgs) <= self.SHORT_TERM_MAX:
             return
+        # 优先使用 LLM 摘要 (需注入 config)
+        if self._config:
+            try:
+                compressor = ContextCompressor(self._config)
+                system_msgs = [m for m in msgs if m.get("role") == "system"]
+                non_system = [m for m in msgs if m.get("role") != "system"]
+                if len(non_system) > self.SHORT_TERM_KEEP:
+                    to_compress = non_system[:-self.SHORT_TERM_KEEP]
+                    keep_recent = non_system[-self.SHORT_TERM_KEEP:]
+                    prompt = compressor._build_summary_prompt(to_compress)
+                    summary = compressor._generate_summary(prompt)
+                    if summary:
+                        summary_msg = {
+                            "role": "system",
+                            "content": "[对话摘要] 以下是之前对话的要点:\n" + summary,
+                        }
+                        self._short_term[session_id] = system_msgs + [summary_msg] + keep_recent
+                        return
+            except Exception:
+                pass
+        # 降级: 简单裁剪 (保留首条 + 最近 N 条)
         first = msgs[0] if msgs else None
         recent = msgs[-self.SHORT_TERM_KEEP:]
         dropped = len(msgs) - self.SHORT_TERM_KEEP - (1 if first else 0)
@@ -346,16 +478,21 @@ class ToolRegistry:
 
 # ---- 3. AgentLoopController ----
 class AgentLoopController:
-    """Agent 循环控制: 步数 / 重复 / 失败 限制"""
+    """Agent 循环控制: 步数 / 重复 / 失败 / 超时 限制 + 步骤日志"""
 
-    MAX_STEPS = 6
+    MAX_STEPS = 8            # 最大思考步数 (从 6 提升至 8)
     MAX_SAME_TOOL_CALLS = 2
     MAX_FAILURES = 2
+    TIMEOUT_PER_STEP = 30   # 单步超时 (秒)
+    MAX_TOTAL_TIME = 120    # Agent 总执行超时 (秒)
 
     def __init__(self):
         self.step = 0
         self.failures = 0
         self.call_history = []  # [(name, args_key)]
+        self.start_time = time.time()
+        self.step_start = self.start_time
+        self._log = []  # [{"step", "tool", "ok", "duration"}]
 
     def check_duplicate(self, name, args):
         """返回 (是否重复, 已调用次数)"""
@@ -370,22 +507,48 @@ class AgentLoopController:
     def record_failure(self):
         self.failures += 1
 
+    def begin_step(self):
+        """标记新一步开始, 重置单步计时"""
+        self.step_start = time.time()
+
     def should_stop(self):
         if self.step >= self.MAX_STEPS:
             return True, "已达到最大思考步数({}步)限制。请基于已获取的信息, 直接回答用户的问题, 不要再调用工具。".format(self.MAX_STEPS)
         if self.failures >= self.MAX_FAILURES:
             return True, "工具调用连续失败次数达到上限({}次)。请基于已获取的信息, 直接回答用户的问题。".format(self.MAX_FAILURES)
+        elapsed = time.time() - self.start_time
+        if elapsed > self.MAX_TOTAL_TIME:
+            return True, "Agent 执行总时长已超过 {} 秒上限。请基于已获取的信息, 直接回答用户的问题。".format(self.MAX_TOTAL_TIME)
+        if self.step > 0:
+            step_elapsed = time.time() - self.step_start
+            if step_elapsed > self.TIMEOUT_PER_STEP:
+                return True, "当前步骤执行超时({}秒)。请基于已获取的信息, 直接回答用户的问题。".format(self.TIMEOUT_PER_STEP)
         return False, ""
+
+    def log_step(self, step, tool_name, result_ok):
+        """记录执行日志 (便于调试)"""
+        self._log.append({
+            "step": step,
+            "tool": tool_name,
+            "ok": bool(result_ok),
+            "duration": round(time.time() - self.step_start, 2),
+        })
+
+    def get_log(self):
+        """返回执行日志"""
+        return list(self._log)
 
 
 # ---- 4. ContextBuilder ----
 class ContextBuilder:
-    """组装上下文: 系统提示 + 长期记忆 + 当前书籍上下文 + 短期历史"""
+    """组装上下文: 系统提示 + 长期记忆 + 会话摘要 + 当前书籍上下文 + 短期历史 (按需压缩)"""
 
-    def __init__(self, memory_manager):
+    def __init__(self, memory_manager, config=None):
         self.memory = memory_manager
+        self.config = config
+        self.compressor = ContextCompressor(config) if config else None
 
-    def build(self, messages, context):
+    def build(self, messages, context, session_id="default"):
         parts = [AI_SYSTEM_PROMPT]
 
         mem = self.memory.load_memory()
@@ -403,13 +566,24 @@ class ContextBuilder:
             fact_lines = ["- {}".format(f.get("content", "")) for f in facts]
             parts.append("\n\n[长期记忆 - 已知事实]\n" + "\n".join(fact_lines))
 
+        # 会话摘要 (来自之前对话, 持久化)
+        session_summary = self.memory.get_session_summary(session_id)
+        if session_summary:
+            parts.append("\n\n[本会话历史摘要]\n" + session_summary)
+
         # 当前阅读上下文
         book_ctx = self._build_book_context(context)
         if book_ctx:
             parts.append("\n\n[当前阅读上下文]\n" + book_ctx)
 
         system_content = "".join(parts)
-        return [{"role": "system", "content": system_content}] + messages
+        built = [{"role": "system", "content": system_content}] + messages
+
+        # 按需压缩 (token 预算超出时调 LLM 生成摘要)
+        if self.compressor and self.compressor.should_compress(built):
+            built = self.compressor.compress(built)
+
+        return built
 
     def _build_book_context(self, context):
         if not context:
@@ -1317,19 +1491,19 @@ class Handler(BaseHTTPRequestHandler):
         context = payload.get("context", {}) or {}
         session_id = payload.get("session_id", "default")
 
-        # 短期记忆裁剪 (对前端传入的纯文本历史做安全裁剪)
-        messages = MEMORY.trim_short_term(messages)
-        # 记录到短期记忆
-        for m in messages[-self._last_n(messages, 4)]:
-            MEMORY.add_short_term(session_id, m)
+        # 注入配置, 使记忆 / 上下文压缩模块可调用 LLM
+        MEMORY.set_config(config)
 
-        # 组装上下文
-        ctx_builder = ContextBuilder(MEMORY)
+        # 安全裁剪前端传入的纯文本历史 (不破坏 tool_calls 结构)
+        messages = MEMORY.trim_short_term(messages)
+
+        # 组装上下文 (注入会话摘要 + 长期记忆 + 书籍上下文, 按需压缩)
+        ctx_builder = ContextBuilder(MEMORY, config)
         registry = ToolRegistry()
         register_default_tools(registry)
         controller = AgentLoopController()
 
-        llm_messages = ctx_builder.build(messages, context)
+        llm_messages = ctx_builder.build(messages, context, session_id)
         collected_actions = []
         final_content = ""
 
@@ -1341,6 +1515,8 @@ class Handler(BaseHTTPRequestHandler):
                 break
 
             controller.step += 1
+            controller.begin_step()
+
             response = call_llm_api(config, llm_messages, registry.get_schemas())
             if "error" in response:
                 final_content = "AI 调用失败: {}".format(response["error"])
@@ -1382,8 +1558,12 @@ class Handler(BaseHTTPRequestHandler):
                     result = registry.execute(fn_name, fn_args, context)
 
                 # 失败计数
-                if not result.get("ok"):
+                result_ok = bool(result.get("ok"))
+                if not result_ok:
                     controller.record_failure()
+
+                # 记录步骤日志 (便于调试)
+                controller.log_step(controller.step, fn_name, result_ok)
 
                 # 序列化为工具结果内容
                 result_str = json.dumps(result, ensure_ascii=False)
@@ -1399,7 +1579,13 @@ class Handler(BaseHTTPRequestHandler):
                     "content": result_str,
                 })
 
-            # 循环继续: 检查是否触发失败上限 (should_stop 在下一轮开头判断)
+            # 上下文增长后按需压缩 (避免 token 超限)
+            if ctx_builder.compressor and ctx_builder.compressor.should_compress(llm_messages):
+                llm_messages = ctx_builder.compressor.compress(llm_messages)
+                # 清理可能因压缩产生的孤立 tool 消息 (其 tool_call_id 已不在上下文中)
+                llm_messages = self._sanitize_messages(llm_messages)
+
+            # 循环继续: 检查步数/失败/超时上限 (should_stop 在下一轮开头判断)
 
         # ---- 流式输出最终回答 ----
         # 从最终回答中提取动作指令
@@ -1438,9 +1624,56 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: {\"done\": true}\n\n")
         self.wfile.flush()
 
+        # ---- 保存会话摘要 (best-effort, 在响应发送后执行, 不影响用户体验) ----
+        self._save_session_summary(session_id, llm_messages, config)
+
     @staticmethod
-    def _last_n(messages, n):
-        return min(n, len(messages))
+    def _sanitize_messages(messages):
+        """移除孤立的 tool 消息 (其 tool_call_id 在前序 assistant 消息中不存在)"""
+        valid_call_ids = set()
+        for m in messages:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m.get("tool_calls", []):
+                    cid = tc.get("id")
+                    if cid:
+                        valid_call_ids.add(cid)
+        return [m for m in messages
+                if m.get("role") != "tool" or m.get("tool_call_id") in valid_call_ids]
+
+    def _save_session_summary(self, session_id, messages, config):
+        """生成并保存会话摘要 (best-effort), 与已有摘要合并后持久化"""
+        try:
+            # 提取本轮最后一条用户消息与最终回答
+            last_user = ""
+            last_assistant = ""
+            tool_names = []
+            for m in messages:
+                role = m.get("role", "")
+                if role == "user":
+                    last_user = (m.get("content", "") or "")[:300]
+                if role == "assistant":
+                    c = m.get("content", "") or ""
+                    if c:
+                        last_assistant = c[:300]
+                if m.get("tool_calls"):
+                    for tc in m["tool_calls"]:
+                        tool_names.append(tc.get("function", {}).get("name", ""))
+            if not last_user and not last_assistant:
+                return
+            prompt = ("请用中文将以下本轮对话摘要为 100 字以内的要点, 保留关键信息:\n"
+                      "用户: {}\n助手: {}\n工具调用: {}").format(
+                last_user, last_assistant, ", ".join(tool_names) or "无")
+            compressor = ContextCompressor(config)
+            summary = compressor._generate_summary(prompt)
+            if summary:
+                existing = MEMORY.get_session_summary(session_id)
+                if existing:
+                    combined = existing + "\n" + summary[:200]
+                else:
+                    combined = summary[:300]
+                MEMORY.set_session_summary(session_id, combined[:800])
+        except Exception:
+            pass
 
     # ---- 原有 API ----
     def _api_save_progress(self, book_id):
