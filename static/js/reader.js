@@ -457,4 +457,4 @@ function decodeText(buf) {
   return utf8;
 }
 
-export const Reader = { open, cleanup, init: bindControls, applyTheme, back: () => ui.back };
+export const Reader = { open, cleanup, init: bindControls, applyTheme, back: () => ui.back, getLocation: () => active?.getLocation?.() || { page: 0, progress: 0, label: '' } };

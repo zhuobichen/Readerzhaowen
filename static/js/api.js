@@ -149,11 +149,11 @@ const API = {
   },
 
   // AI 对话：返回 fetch Response（SSE 流），由调用方读取流
-  async aiChat(messages) {
+  async aiChat(messages, context = {}) {
     const r = await fetch('/api/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({ messages, context }),
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));

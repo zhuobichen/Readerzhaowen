@@ -3,6 +3,8 @@ import API, { humanSize } from './api.js';
 import { CoverStore, makePlaceholderCover } from './store.js';
 
 let allBooks = [];
+let categories = [];            // [{name, count}]
+let currentCategory = null;    // null=全部, '__uncat__'=未分类, 其它=分类名
 let io = null;          // IntersectionObserver 懒加载封面
 const pendingCovers = new Set();
 
@@ -12,7 +14,12 @@ const el = {
   search: document.getElementById('search-input'),
   format: document.getElementById('filter-format'),
   sort: document.getElementById('sort-by'),
+  sidebar: document.getElementById('category-sidebar'),
 };
+
+// 右键菜单与分类选择器（动态创建，复用单例）
+let ctxMenuEl = null;
+let catPickerEl = null;
 
 function initObserver() {
   if (io) io.disconnect();
@@ -38,7 +45,80 @@ async function load() {
     return;
   }
   buildFormatFilter();
+  refreshCategories();
   render();
+}
+
+/** 拉取分类并渲染侧栏 */
+async function refreshCategories() {
+  try {
+    categories = await API.getCategories();
+  } catch { categories = []; }
+  renderSidebar();
+}
+
+/** 按当前 allBooks 计算各分类数量 */
+function categoryCounts() {
+  const counts = {};
+  let uncat = 0;
+  for (const b of allBooks) {
+    if (b.category) counts[b.category] = (counts[b.category] || 0) + 1;
+    else uncat++;
+  }
+  return { counts, uncat };
+}
+
+/** 渲染左侧分类侧栏 */
+function renderSidebar() {
+  if (!el.sidebar) return;
+  const { counts, uncat } = categoryCounts();
+  const items = [];
+  // 全部
+  items.push(renderCatItem('全部', 'all', allBooks.length, currentCategory === null));
+  // 未分类
+  items.push(renderCatItem('未分类', '__uncat__', uncat, currentCategory === '__uncat__'));
+  // 各分类
+  for (const c of categories) {
+    const name = c.name;
+    const cnt = counts[name] != null ? counts[name] : (c.count || 0);
+    items.push(renderCatItem(name, name, cnt, currentCategory === name));
+  }
+  el.sidebar.innerHTML = `
+    <div class="cat-list">${items.join('')}</div>
+    <button class="cat-add" id="cat-add-btn" title="新建分类">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      <span>新建分类</span>
+    </button>`;
+  // 绑定点击
+  el.sidebar.querySelectorAll('.cat-item').forEach(node => {
+    node.addEventListener('click', () => {
+      const cat = node.dataset.cat;
+      currentCategory = cat === 'all' ? null : (cat === '__uncat__' ? '__uncat__' : cat);
+      renderSidebar();
+      render();
+    });
+  });
+  const addBtn = el.sidebar.querySelector('#cat-add-btn');
+  if (addBtn) addBtn.addEventListener('click', addCategory);
+}
+
+function renderCatItem(label, cat, count, active) {
+  return `<div class="cat-item${active ? ' active' : ''}" data-cat="${escapeAttr(cat)}" title="${escapeAttr(label)}">
+    <span class="cat-name">${escapeHtml(label)}</span>
+    <span class="cat-badge">${count}</span>
+  </div>`;
+}
+
+/** 新建分类 */
+async function addCategory() {
+  const name = prompt('请输入分类名称：');
+  if (!name || !name.trim()) return;
+  try {
+    await API.createCategory(name.trim());
+    await refreshCategories();
+  } catch (e) {
+    alert(e.message || '新建分类失败');
+  }
 }
 
 function buildFormatFilter() {
@@ -51,6 +131,12 @@ function buildFormatFilter() {
 
 function filtered() {
   let list = [...allBooks];
+  // 分类筛选
+  if (currentCategory === '__uncat__') {
+    list = list.filter(b => !b.category);
+  } else if (currentCategory) {
+    list = list.filter(b => b.category === currentCategory);
+  }
   const q = el.search.value.trim().toLowerCase();
   const f = el.format.value;
   if (q) list = list.filter(b => (b.title || '').toLowerCase().includes(q) || (b.author || '').toLowerCase().includes(q) || b.name.toLowerCase().includes(q));
@@ -87,12 +173,22 @@ function render() {
       <div class="book-meta">
         <div class="book-title">${escapeHtml(b.title || b.name)}</div>
         ${b.author ? `<div class="book-author">${escapeHtml(b.author)}</div>` : ''}
+        ${b.category ? `<div class="book-cat" data-cat="${escapeAttr(b.category)}"><span class="book-cat-tag">${escapeHtml(b.category)}</span></div>` : ''}
       </div>`;
     card.querySelector('.cp-title').textContent = b.title || b.name;
     // 占位色板先填上，避免纯灰
     const [a, c] = palette(b.title || b.name);
     card.querySelector('.cover-placeholder').style.background = `linear-gradient(150deg, ${a} 0%, ${c} 100%)`;
     card.addEventListener('click', () => openBook(b));
+    // 右键菜单
+    card.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e.clientX, e.clientY, b); });
+    // 分类标签点击 -> 弹出分类选择
+    const catTag = card.querySelector('.book-cat-tag');
+    if (catTag) catTag.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const r = catTag.getBoundingClientRect();
+      showCategoryPicker(r.left, r.bottom + 4, b);
+    });
     frag.appendChild(card);
     io.observe(card);
   }

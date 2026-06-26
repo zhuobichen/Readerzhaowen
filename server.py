@@ -22,7 +22,10 @@
   DELETE /api/categories/<name>-> 删除分类
   GET  /api/ai/config          -> 获取AI配置 (key脱敏)
   POST /api/ai/config          -> 保存AI配置
-  POST /api/ai/chat            -> AI对话代理 (流式SSE)
+  POST /api/ai/chat            -> AI Agent 对话 (流式SSE)
+  GET  /api/ai/memory          -> 获取 Agent 长期记忆
+  POST /api/ai/memory          -> 新增记忆事实
+  DELETE /api/ai/memory/<id>   -> 删除记忆事实
 
 启动:  python server.py
 默认端口 8769, 也可: python server.py 9000
@@ -45,6 +48,7 @@ STATIC_DIR = os.path.join(ROOT, "static")
 DATA_DIR = os.path.join(ROOT, "data")
 LIBRARY_FILE = os.path.join(DATA_DIR, "library.json")
 AI_CONFIG_FILE = os.path.join(DATA_DIR, "ai_config.json")
+MEMORY_FILE = os.path.join(DATA_DIR, "agent_memory.json")
 
 SUPPORTED_EXT = {
     ".pdf": "pdf", ".epub": "epub", ".txt": "txt",
@@ -180,197 +184,648 @@ def extract_book_text(path, fmt, max_chars=8000):
 
 
 # --------------------------------------------------------------------------- #
-#  AI 工具定义 (OpenAI function calling 格式)
+#  Agent 架构: MemoryManager / ToolRegistry / AgentLoopController /
+#               ContextBuilder / 工具定义 / LLM 调用
 # --------------------------------------------------------------------------- #
+
+# ---- 标准化工具结果 ----
+def make_tool_result(ok, data=None, error="", retryable=False):
+    """构造统一的 ToolResult: {ok, data, error, retryable}"""
+    return {"ok": bool(ok), "data": data, "error": error, "retryable": bool(retryable)}
+
+
+# ---- 1. MemoryManager ----
+class MemoryManager:
+    """长期记忆 (data/agent_memory.json) + 短期记忆 (按会话 in-memory)"""
+
+    _DEFAULT = {
+        "profile": {"language": "zh"},
+        "preferences": {"summaryStyle": "detailed", "outputLanguage": "zh"},
+        "readingHabits": {"favoriteTopics": [], "frequentlyReadBooks": []},
+        "stableFacts": [],  # [{id, content, type, confidence, source, createdAt, updatedAt}]
+    }
+
+    SHORT_TERM_MAX = 20   # 单个会话最大短时消息数
+    SHORT_TERM_KEEP = 12  # 超限时保留最近的消息条数
+
+    def __init__(self):
+        self._memory = {}
+        self._short_term = {}  # session_id -> [messages]
+        self.load_memory()
+
+    # ---- 长期记忆 ----
+    def load_memory(self):
+        if os.path.exists(MEMORY_FILE):
+            try:
+                with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                    self._memory = json.load(f)
+            except Exception:
+                self._memory = json.loads(json.dumps(self._DEFAULT))
+        else:
+            self._memory = json.loads(json.dumps(self._DEFAULT))
+        # 补全缺失的字段
+        for k, v in self._DEFAULT.items():
+            if k not in self._memory:
+                self._memory[k] = json.loads(json.dumps(v))
+        return self._memory
+
+    def save_memory(self):
+        tmp = MEMORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._memory, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, MEMORY_FILE)
+
+    def add_fact(self, content, type="fact", confidence=0.8, source="user"):
+        now = int(time.time())
+        fact = {
+            "id": "fact-{}-{}".format(now, id(content) & 0xffff),
+            "content": content,
+            "type": type,
+            "confidence": float(confidence),
+            "source": source,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        self._memory.setdefault("stableFacts", []).append(fact)
+        self.save_memory()
+        return fact
+
+    def remove_fact(self, fact_id):
+        facts = self._memory.get("stableFacts", [])
+        before = len(facts)
+        self._memory["stableFacts"] = [f for f in facts if f.get("id") != fact_id]
+        if len(self._memory["stableFacts"]) != before:
+            self.save_memory()
+            return True
+        return False
+
+    def get_relevant_memory(self, query):
+        """简单的关键词匹配: 检索与 query 相关的长期事实"""
+        query_lower = (query or "").lower()
+        keywords = [w for w in re.split(r'[\s,，。.!！?？、；;:：()（）]+', query_lower) if w]
+        facts = self._memory.get("stableFacts", [])
+        relevant = []
+        for fact in facts:
+            content_lower = fact.get("content", "").lower()
+            if any(kw in content_lower for kw in keywords):
+                relevant.append(fact)
+        # 若无关键词匹配, 返回全部 (帮助 Agent 在无明确线索时仍可见记忆概貌)
+        if not relevant and keywords:
+            relevant = list(facts)
+        return relevant
+
+    # ---- 短期记忆 ----
+    def get_short_term(self, session_id):
+        return self._short_term.get(session_id, [])
+
+    def add_short_term(self, session_id, message):
+        msgs = self._short_term.setdefault(session_id, [])
+        msgs.append(message)
+        if len(msgs) > self.SHORT_TERM_MAX:
+            self._summarize_old(session_id)
+
+    def _summarize_old(self, session_id):
+        """超出上限时压缩较早的消息 (保留首条 + 最近 N 条)"""
+        msgs = self._short_term.get(session_id, [])
+        if len(msgs) <= self.SHORT_TERM_MAX:
+            return
+        first = msgs[0] if msgs else None
+        recent = msgs[-self.SHORT_TERM_KEEP:]
+        dropped = len(msgs) - self.SHORT_TERM_KEEP - (1 if first else 0)
+        summary = {
+            "role": "system",
+            "content": "[历史对话已压缩] 之前 {} 条消息已被省略, 请基于最近的上下文继续。".format(max(dropped, 0)),
+        }
+        new_list = ([first, summary] if first else [summary]) + recent
+        self._short_term[session_id] = new_list
+
+    def trim_short_term(self, messages):
+        """对纯文本消息列表做安全裁剪 (不破坏 tool_calls 结构)"""
+        if len(messages) <= self.SHORT_TERM_MAX:
+            return messages
+        first = messages[0]
+        rest = messages[1:]
+        if len(rest) <= self.SHORT_TERM_KEEP:
+            return messages
+        dropped = len(rest) - self.SHORT_TERM_KEEP
+        note = {"role": "system",
+                "content": "[历史对话已压缩] 之前 {} 条消息已省略。".format(dropped)}
+        return [first, note] + rest[-self.SHORT_TERM_KEEP:]
+
+
+# 全局 MemoryManager 实例
+MEMORY = MemoryManager()
+
+
+# ---- 2. ToolRegistry ----
+class ToolRegistry:
+    """工具注册表: 每个 tool 返回统一 ToolResult"""
+
+    def __init__(self):
+        self._tools = {}  # name -> {"handler": fn, "schema": dict}
+
+    def register(self, name, handler, schema):
+        self._tools[name] = {"handler": handler, "schema": schema}
+
+    def get_schemas(self):
+        """返回 OpenAI function-calling 格式的工具列表"""
+        return [self._tools[n]["schema"] for n in self._tools]
+
+    def has(self, name):
+        return name in self._tools
+
+    def execute(self, name, args, context=None):
+        if not self.has(name):
+            return make_tool_result(False, error="未知工具: {}".format(name), retryable=False)
+        handler = self._tools[name]["handler"]
+        try:
+            return handler(args, context)
+        except Exception as e:
+            return make_tool_result(False, error="工具执行出错: {}".format(e), retryable=True)
+
+
+# ---- 3. AgentLoopController ----
+class AgentLoopController:
+    """Agent 循环控制: 步数 / 重复 / 失败 限制"""
+
+    MAX_STEPS = 6
+    MAX_SAME_TOOL_CALLS = 2
+    MAX_FAILURES = 2
+
+    def __init__(self):
+        self.step = 0
+        self.failures = 0
+        self.call_history = []  # [(name, args_key)]
+
+    def check_duplicate(self, name, args):
+        """返回 (是否重复, 已调用次数)"""
+        args_key = json.dumps(args, sort_keys=True, ensure_ascii=False)
+        count = sum(1 for (n, a) in self.call_history if n == name and a == args_key)
+        return count >= self.MAX_SAME_TOOL_CALLS, count
+
+    def record_call(self, name, args):
+        args_key = json.dumps(args, sort_keys=True, ensure_ascii=False)
+        self.call_history.append((name, args_key))
+
+    def record_failure(self):
+        self.failures += 1
+
+    def should_stop(self):
+        if self.step >= self.MAX_STEPS:
+            return True, "已达到最大思考步数({}步)限制。请基于已获取的信息, 直接回答用户的问题, 不要再调用工具。".format(self.MAX_STEPS)
+        if self.failures >= self.MAX_FAILURES:
+            return True, "工具调用连续失败次数达到上限({}次)。请基于已获取的信息, 直接回答用户的问题。".format(self.MAX_FAILURES)
+        return False, ""
+
+
+# ---- 4. ContextBuilder ----
+class ContextBuilder:
+    """组装上下文: 系统提示 + 长期记忆 + 当前书籍上下文 + 短期历史"""
+
+    def __init__(self, memory_manager):
+        self.memory = memory_manager
+
+    def build(self, messages, context):
+        parts = [AI_SYSTEM_PROMPT]
+
+        mem = self.memory.load_memory()
+        # 用户偏好
+        prefs = mem.get("preferences", {})
+        if prefs:
+            parts.append("\n\n[用户偏好]\n" + json.dumps(prefs, ensure_ascii=False, indent=2))
+        # 阅读习惯
+        habits = mem.get("readingHabits", {})
+        if habits and (habits.get("favoriteTopics") or habits.get("frequentlyReadBooks")):
+            parts.append("\n\n[阅读习惯]\n" + json.dumps(habits, ensure_ascii=False, indent=2))
+        # 长期事实
+        facts = mem.get("stableFacts", [])
+        if facts:
+            fact_lines = ["- {}".format(f.get("content", "")) for f in facts]
+            parts.append("\n\n[长期记忆 - 已知事实]\n" + "\n".join(fact_lines))
+
+        # 当前阅读上下文
+        book_ctx = self._build_book_context(context)
+        if book_ctx:
+            parts.append("\n\n[当前阅读上下文]\n" + book_ctx)
+
+        system_content = "".join(parts)
+        return [{"role": "system", "content": system_content}] + messages
+
+    def _build_book_context(self, context):
+        if not context:
+            return ""
+        book_id = context.get("currentBookId")
+        if not book_id:
+            return "当前未打开任何书籍。"
+        if not book_path(book_id):
+            return "当前书籍 ID: {} (文件不存在于书架)。".format(book_id)
+        lib = load_library().get("books", {})
+        meta = lib.get(book_id, {})
+        title = meta.get("title") or os.path.splitext(book_id)[0]
+        author = meta.get("author", "")
+        cat = meta.get("category", "未分类")
+        progress = meta.get("progress", 0)
+        page = context.get("currentPage") or meta.get("page", 0)
+        lines = [
+            "当前书籍: 《{}》{}".format(title, " - " + author if author else ""),
+            "书籍ID: {}".format(book_id),
+            "分类: {}".format(cat),
+            "阅读进度: {:.0f}%".format(progress * 100),
+            "当前页码: {}".format(page),
+        ]
+        return "\n".join(lines)
+
+
+# ---- 系统提示 ----
+AI_SYSTEM_PROMPT = """你是「阅微」, 一个本地电子书书架的智能 AI 助手, 基于 Agent 架构运行。你可以通过调用工具来完成用户的请求。
+
+## 你的能力 (可用工具)
+1. list_books - 列出书架上的所有书籍 (含书名/作者/格式/分类/进度)
+2. find_books - 按关键词搜索书籍
+3. get_book_content - 获取一本书的文本内容, 用于总结或分析
+4. get_book_metadata - 获取书籍元数据 (标题/作者/分类/进度)
+5. categorize_book - 为书籍设置分类
+6. list_categories - 列出所有已创建的分类
+7. delete_book - 删除一本书 (删除文件)
+8. open_book - 在阅读器中打开一本书 (前端会执行打开操作)
+9. create_note - 为一本书创建笔记
+10. remember_preference - 将用户偏好或重要事实保存到长期记忆
+11. recall_memory - 从长期记忆中检索与查询相关的记忆
+12. get_reading_context - 获取用户当前正在阅读的书籍上下文
+
+## 行为规则
+- 用简洁友好的中文回答。
+- 当用户要求总结一本书时, 先调用 get_book_content 获取内容, 再进行总结。
+- 当用户要打开书或删除书时, 调用相应工具; 前端会根据返回的 __ACTION__ 指令执行操作。
+- 如果用户提到偏好或重要信息, 主动调用 remember_preference 保存到长期记忆。
+- 回答问题前可先调用 recall_memory 检索是否有相关记忆, 也可调用 get_reading_context 了解用户当前正在读什么。
+- 不要用相同参数重复调用同一个工具, 请直接使用之前返回的结果。
+- 工具调用失败时不要无限重试, 基于已有信息回答即可。
+- 每个工具返回统一结构 {ok, data, error, retryable}; ok 为 false 时表示失败。
+- 当操作需要在浏览器执行时 (如打开书籍), 工具会返回 __ACTION__ 指令, 你也可以在最终回答中包含它。
+
+## 记忆机制
+- 你拥有长期记忆, 可以记住用户的偏好、阅读习惯和重要事实。
+- 主动使用 remember_preference 保存用户告诉你的偏好或事实。
+- 回答时可参考 recall_memory 检索到的相关记忆, 以及上下文中注入的长期记忆摘要。"""
+
+
+# ---- 工具执行函数 (每个返回 ToolResult) ----
+def _tool_list_books(args, context):
+    books = scan_books()
+    lib = load_library().get("books", {})
+    data = []
+    for b in books:
+        meta = lib.get(b["id"], {})
+        title = meta.get("title") or os.path.splitext(b["name"])[0]
+        data.append({
+            "id": b["id"],
+            "title": title,
+            "author": meta.get("author", ""),
+            "format": b["format"],
+            "category": meta.get("category", "未分类"),
+            "progress": meta.get("progress", 0),
+        })
+    return make_tool_result(True, data={"books": data, "count": len(data)})
+
+
+def _tool_find_books(args, context):
+    q = (args.get("query", "") or "").lower()
+    books = scan_books()
+    lib = load_library().get("books", {})
+    data = []
+    for b in books:
+        meta = lib.get(b["id"], {})
+        title = meta.get("title") or os.path.splitext(b["name"])[0]
+        author = meta.get("author", "")
+        if q in title.lower() or q in author.lower() or q in b["id"].lower():
+            data.append({
+                "id": b["id"],
+                "title": title,
+                "author": author,
+                "category": meta.get("category", "未分类"),
+            })
+    return make_tool_result(True, data={"books": data, "count": len(data)})
+
+
+def _tool_get_book_content(args, context):
+    bid = args.get("book_id", "")
+    full = book_path(bid)
+    if not full:
+        return make_tool_result(False, error="找不到这本书: {}".format(bid), retryable=False)
+    ext = os.path.splitext(full)[1].lower()
+    fmt = SUPPORTED_EXT.get(ext, "")
+    text = extract_book_text(full, fmt)
+    if not text:
+        return make_tool_result(False, error="无法提取 {} 格式书籍的文本内容: {}".format(fmt, bid), retryable=False)
+    return make_tool_result(True, data={"content": text, "format": fmt, "bookId": bid})
+
+
+def _tool_get_book_metadata(args, context):
+    bid = args.get("book_id", "")
+    if not book_path(bid):
+        return make_tool_result(False, error="找不到这本书: {}".format(bid), retryable=False)
+    lib = load_library().get("books", {})
+    meta = lib.get(bid, {})
+    title = meta.get("title") or os.path.splitext(bid)[0]
+    return make_tool_result(True, data={
+        "bookId": bid,
+        "title": title,
+        "author": meta.get("author", ""),
+        "category": meta.get("category", "未分类"),
+        "progress": meta.get("progress", 0),
+        "lastRead": meta.get("lastRead", 0),
+    })
+
+
+def _tool_categorize_book(args, context):
+    bid = args.get("book_id", "")
+    cat = args.get("category", "")
+    if not book_path(bid):
+        return make_tool_result(False, error="找不到这本书: {}".format(bid), retryable=False)
+    lib = load_library()
+    meta = lib.setdefault("books", {}).setdefault(bid, {})
+    meta["category"] = cat
+    cats = lib.setdefault("categories", [])
+    if cat and cat not in cats:
+        cats.append(cat)
+    save_library(lib)
+    return make_tool_result(True, data={
+        "bookId": bid,
+        "category": cat,
+        "message": "已将《{}》分类为「{}」".format(meta.get("title", bid), cat),
+    })
+
+
+def _tool_list_categories(args, context):
+    cats = get_all_categories()
+    lib = load_library().get("books", {})
+    counts = {}
+    for meta in lib.values():
+        c = meta.get("category", "未分类")
+        counts[c] = counts.get(c, 0) + 1
+    data = [{"name": c, "count": counts.get(c, 0)} for c in cats]
+    return make_tool_result(True, data={"categories": data, "count": len(data)})
+
+
+def _tool_delete_book(args, context):
+    bid = args.get("book_id", "")
+    full = book_path(bid)
+    if not full:
+        return make_tool_result(False, error="找不到这本书: {}".format(bid), retryable=False)
+    lib = load_library()
+    title = lib.get("books", {}).get(bid, {}).get("title", bid)
+    try:
+        os.remove(full)
+    except Exception as e:
+        return make_tool_result(False, error="删除失败: {}".format(e), retryable=True)
+    lib.get("books", {}).pop(bid, None)
+    save_library(lib)
+    return make_tool_result(True, data={"bookId": bid, "title": title, "message": "已删除《{}》".format(title)})
+
+
+def _tool_open_book(args, context):
+    bid = args.get("book_id", "")
+    if not book_path(bid):
+        return make_tool_result(False, error="找不到这本书: {}".format(bid), retryable=False)
+    return make_tool_result(True, data={"action": "__ACTION__:open_book:{}".format(bid), "bookId": bid})
+
+
+def _tool_create_note(args, context):
+    bid = args.get("book_id", "")
+    content = args.get("content", "")
+    if not book_path(bid):
+        return make_tool_result(False, error="找不到这本书: {}".format(bid), retryable=False)
+    if not content:
+        return make_tool_result(False, error="笔记内容不能为空", retryable=False)
+    lib = load_library()
+    meta = lib.setdefault("books", {}).setdefault(bid, {})
+    notes = meta.setdefault("notes", [])
+    now = int(time.time())
+    note = {
+        "id": "note-{}-{}".format(now, id(content) & 0xffff),
+        "content": content,
+        "page": meta.get("page", 0),
+        "progress": meta.get("progress", 0),
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    notes.append(note)
+    notes.sort(key=lambda n: n.get("createdAt", 0))
+    save_library(lib)
+    return make_tool_result(True, data={
+        "noteId": note["id"],
+        "message": "已为《{}》创建笔记".format(meta.get("title", bid)),
+    })
+
+
+def _tool_remember_preference(args, context):
+    content = args.get("content", "")
+    type_ = args.get("type", "preference")
+    confidence = args.get("confidence", 0.8)
+    if not content:
+        return make_tool_result(False, error="记忆内容不能为空", retryable=False)
+    fact = MEMORY.add_fact(content, type_, confidence, source="agent")
+    return make_tool_result(True, data={"factId": fact["id"], "message": "已保存到长期记忆"})
+
+
+def _tool_recall_memory(args, context):
+    query = args.get("query", "")
+    facts = MEMORY.get_relevant_memory(query)
+    prefs = MEMORY.load_memory().get("preferences", {})
+    return make_tool_result(True, data={"facts": facts, "preferences": prefs, "count": len(facts)})
+
+
+def _tool_get_reading_context(args, context):
+    if not context:
+        return make_tool_result(True, data={"message": "当前没有阅读上下文"})
+    bid = context.get("currentBookId")
+    if not bid:
+        return make_tool_result(True, data={"message": "当前没有打开的书籍"})
+    if not book_path(bid):
+        return make_tool_result(False, error="当前书籍文件不存在: {}".format(bid), retryable=False)
+    lib = load_library().get("books", {})
+    meta = lib.get(bid, {})
+    title = meta.get("title") or os.path.splitext(bid)[0]
+    return make_tool_result(True, data={
+        "bookId": bid,
+        "title": title,
+        "author": meta.get("author", ""),
+        "category": meta.get("category", "未分类"),
+        "progress": meta.get("progress", 0),
+        "currentPage": context.get("currentPage", 0),
+        "currentProgress": context.get("currentProgress", 0),
+        "currentLabel": context.get("currentLabel", ""),
+    })
+
+
+# ---- 工具定义 (schema + handler) ----
+TOOL_DEFS = [
+    {
+        "name": "list_books",
+        "description": "列出书架上的所有书籍, 包括书名、作者、格式、分类和阅读进度",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": _tool_list_books,
+    },
+    {
+        "name": "find_books",
+        "description": "按关键词搜索书籍 (匹配书名、作者或文件名)",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "搜索关键词"}},
+            "required": ["query"],
+        },
+        "handler": _tool_find_books,
+    },
+    {
+        "name": "get_book_content",
+        "description": "获取一本书的文本内容, 用于总结或分析",
+        "parameters": {
+            "type": "object",
+            "properties": {"book_id": {"type": "string", "description": "书籍ID (文件名)"}},
+            "required": ["book_id"],
+        },
+        "handler": _tool_get_book_content,
+    },
+    {
+        "name": "get_book_metadata",
+        "description": "获取书籍的元数据: 标题、作者、分类、阅读进度",
+        "parameters": {
+            "type": "object",
+            "properties": {"book_id": {"type": "string", "description": "书籍ID"}},
+            "required": ["book_id"],
+        },
+        "handler": _tool_get_book_metadata,
+    },
+    {
+        "name": "categorize_book",
+        "description": "为书籍设置分类",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "book_id": {"type": "string", "description": "书籍ID"},
+                "category": {"type": "string", "description": "分类名称"},
+            },
+            "required": ["book_id", "category"],
+        },
+        "handler": _tool_categorize_book,
+    },
+    {
+        "name": "list_categories",
+        "description": "列出所有已创建的分类及每个分类的书籍数量",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": _tool_list_categories,
+    },
+    {
+        "name": "delete_book",
+        "description": "从书架删除一本书 (删除文件, 不可恢复)",
+        "parameters": {
+            "type": "object",
+            "properties": {"book_id": {"type": "string", "description": "书籍ID"}},
+            "required": ["book_id"],
+        },
+        "handler": _tool_delete_book,
+    },
+    {
+        "name": "open_book",
+        "description": "在阅读器中打开一本书 (前端会执行打开操作)",
+        "parameters": {
+            "type": "object",
+            "properties": {"book_id": {"type": "string", "description": "书籍ID"}},
+            "required": ["book_id"],
+        },
+        "handler": _tool_open_book,
+    },
+    {
+        "name": "create_note",
+        "description": "为书籍创建一条笔记",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "book_id": {"type": "string", "description": "书籍ID"},
+                "content": {"type": "string", "description": "笔记内容"},
+            },
+            "required": ["book_id", "content"],
+        },
+        "handler": _tool_create_note,
+    },
+    {
+        "name": "remember_preference",
+        "description": "将用户偏好或重要事实保存到长期记忆, 以便以后回忆",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "要记住的内容"},
+                "type": {"type": "string", "description": "类型: preference/fact/habit", "default": "preference"},
+                "confidence": {"type": "number", "description": "置信度 0-1", "default": 0.8},
+            },
+            "required": ["content"],
+        },
+        "handler": _tool_remember_preference,
+    },
+    {
+        "name": "recall_memory",
+        "description": "从长期记忆中检索与查询相关的记忆",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "检索关键词"}},
+            "required": ["query"],
+        },
+        "handler": _tool_recall_memory,
+    },
+    {
+        "name": "get_reading_context",
+        "description": "获取用户当前正在阅读的书籍上下文 (当前书、页码、进度)",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": _tool_get_reading_context,
+    },
+]
+
+# OpenAI function-calling 格式
 AI_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "list_books",
-            "description": "列出书架上的所有书籍，包括书名、格式、分类和阅读进度",
-            "parameters": {"type": "object", "properties": {}},
+            "name": d["name"],
+            "description": d["description"],
+            "parameters": d["parameters"],
         },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_books",
-            "description": "按关键词搜索书籍（匹配书名或作者）",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "搜索关键词"}},
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_book_content",
-            "description": "获取一本书的文本内容用于总结或分析",
-            "parameters": {
-                "type": "object",
-                "properties": {"book_id": {"type": "string", "description": "书籍ID（文件名）"}},
-                "required": ["book_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "categorize_book",
-            "description": "为书籍设置分类",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "book_id": {"type": "string", "description": "书籍ID"},
-                    "category": {"type": "string", "description": "分类名称"},
-                },
-                "required": ["book_id", "category"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_categories",
-            "description": "列出所有已创建的分类",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_book",
-            "description": "从书架删除一本书（删除文件）",
-            "parameters": {
-                "type": "object",
-                "properties": {"book_id": {"type": "string", "description": "书籍ID"}},
-                "required": ["book_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_book",
-            "description": "在阅读器中打开一本书",
-            "parameters": {
-                "type": "object",
-                "properties": {"book_id": {"type": "string", "description": "书籍ID"}},
-                "required": ["book_id"],
-            },
-        },
-    },
+    }
+    for d in TOOL_DEFS
 ]
 
-AI_SYSTEM_PROMPT = """你是「阅微」，一个本地电子书书架的AI助手。你可以帮助用户：
-1. 总结书籍内容
-2. 查找和推荐书籍
-3. 管理书籍分类
-4. 打开书籍
-5. 删除书籍
-6. 回答关于书籍的问题
 
-请用简洁友好的中文回答。当用户要求总结一本书时，先调用get_book_content获取内容，再进行总结。
-当用户要打开书或删除书时，调用相应工具，前端会执行操作。"""
-
-
-def execute_ai_tool(name, args):
-    """执行AI工具调用，返回结果字符串"""
-    try:
-        if name == "list_books":
-            books = scan_books()
-            lib = load_library().get("books", {})
-            lines = []
-            for b in books:
-                meta = lib.get(b["id"], {})
-                title = meta.get("title") or os.path.splitext(b["name"])[0]
-                cat = meta.get("category", "未分类")
-                prog = meta.get("progress", 0)
-                lines.append(f"- {title} | 格式:{b['format']} | 分类:{cat} | 进度:{prog*100:.0f}% | ID:{b['id']}")
-            return "\n".join(lines) if lines else "书架为空"
-
-        elif name == "find_books":
-            q = args.get("query", "").lower()
-            books = scan_books()
-            lib = load_library().get("books", {})
-            results = []
-            for b in books:
-                meta = lib.get(b["id"], {})
-                title = meta.get("title") or os.path.splitext(b["name"])[0]
-                author = meta.get("author", "")
-                if q in title.lower() or q in author.lower() or q in b["id"].lower():
-                    cat = meta.get("category", "未分类")
-                    results.append(f"- {title}" + (f" - {author}" if author else "") + f" | 分类:{cat} | ID:{b['id']}")
-            return "\n".join(results) if results else "未找到匹配的书籍"
-
-        elif name == "get_book_content":
-            bid = args.get("book_id", "")
-            full = book_path(bid)
-            if not full:
-                return "找不到这本书"
-            ext = os.path.splitext(full)[1].lower()
-            fmt = SUPPORTED_EXT.get(ext, "")
-            text = extract_book_text(full, fmt)
-            if text:
-                return text
-            return f"无法提取{fmt}格式书籍的文本内容。书籍: {bid}"
-
-        elif name == "categorize_book":
-            bid = args.get("book_id", "")
-            cat = args.get("category", "")
-            if not book_path(bid):
-                return "找不到这本书"
-            lib = load_library()
-            meta = lib.setdefault("books", {}).setdefault(bid, {})
-            meta["category"] = cat
-            cats = lib.setdefault("categories", [])
-            if cat not in cats:
-                cats.append(cat)
-            save_library(lib)
-            return f"已将《{meta.get('title', bid)}》分类为「{cat}」"
-
-        elif name == "list_categories":
-            cats = get_all_categories()
-            lib = load_library().get("books", {})
-            counts = {}
-            for meta in lib.values():
-                c = meta.get("category", "未分类")
-                counts[c] = counts.get(c, 0) + 1
-            lines = [f"- {c} ({counts.get(c, 0)}本)" for c in cats]
-            return "\n".join(lines) if lines else "还没有分类"
-
-        elif name == "delete_book":
-            bid = args.get("book_id", "")
-            full = book_path(bid)
-            if not full:
-                return "找不到这本书"
-            lib = load_library()
-            title = lib.get("books", {}).get(bid, {}).get("title", bid)
-            os.remove(full)
-            lib.get("books", {}).pop(bid, None)
-            save_library(lib)
-            return f"已删除《{title}》"
-
-        elif name == "open_book":
-            bid = args.get("book_id", "")
-            full = book_path(bid)
-            if not full:
-                return "找不到这本书"
-            return f"__ACTION__:open_book:{bid}"
-
-        return f"未知工具: {name}"
-    except Exception as e:
-        return f"工具执行出错: {e}"
+def register_default_tools(registry):
+    """将所有内置工具注册到 ToolRegistry"""
+    for d in TOOL_DEFS:
+        schema = {
+            "type": "function",
+            "function": {
+                "name": d["name"],
+                "description": d["description"],
+                "parameters": d["parameters"],
+            },
+        }
+        registry.register(d["name"], d["handler"], schema)
 
 
+def extract_actions(text):
+    """从文本中提取 __ACTION__:open_book:<id> 动作指令"""
+    actions = []
+    for m in re.finditer(r'__ACTION__:open_book:([^\s"\'\\]+)', text or ""):
+        book_id = m.group(1).strip()
+        if book_id:
+            actions.append({"type": "open_book", "book_id": book_id})
+    return actions
+
+
+# ---- LLM API 调用 ----
 def call_llm_api(config, messages, tools=None):
-    """调用 OpenAI 兼容 API (非流式)"""
+    """调用 OpenAI 兼容 API (非流式), 用于工具调用轮次"""
     endpoint = config.get("endpoint", "").rstrip("/")
     if not endpoint:
         endpoint = "https://api.openai.com/v1"
-    url = f"{endpoint}/chat/completions"
+    url = "{}/chat/completions".format(endpoint)
     api_key = config.get("api_key", "")
     model = config.get("model", "gpt-4o-mini")
 
@@ -381,14 +836,14 @@ def call_llm_api(config, messages, tools=None):
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Authorization", "Bearer {}".format(api_key))
 
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
-        return {"error": f"API错误 {e.code}: {err_body[:500]}"}
+        return {"error": "API错误 {}: {}".format(e.code, err_body[:500])}
     except Exception as e:
         return {"error": str(e)}
 
@@ -398,7 +853,7 @@ def call_llm_stream(config, messages, tools=None):
     endpoint = config.get("endpoint", "").rstrip("/")
     if not endpoint:
         endpoint = "https://api.openai.com/v1"
-    url = f"{endpoint}/chat/completions"
+    url = "{}/chat/completions".format(endpoint)
     api_key = config.get("api_key", "")
     model = config.get("model", "gpt-4o-mini")
 
@@ -409,7 +864,7 @@ def call_llm_stream(config, messages, tools=None):
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Authorization", "Bearer {}".format(api_key))
 
     resp = urllib.request.urlopen(req, timeout=120)
     buf = b""
@@ -511,6 +966,10 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["api", "ai", "config"]:
             return self._api_save_ai_config()
 
+        # /api/ai/memory
+        if parts == ["api", "ai", "memory"]:
+            return self._api_memory_add()
+
         # /api/ai/chat
         if parts == ["api", "ai", "chat"]:
             return self._api_ai_chat()
@@ -531,6 +990,10 @@ class Handler(BaseHTTPRequestHandler):
         # /api/categories/<name>
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "categories":
             return self._api_delete_category(urllib.parse.unquote(parts[2]))
+
+        # /api/ai/memory/<id>
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "ai" and parts[2] == "memory":
+            return self._api_memory_delete(urllib.parse.unquote(parts[3]))
 
         self._json(404, {"error": "unknown endpoint"})
 
@@ -627,6 +1090,10 @@ class Handler(BaseHTTPRequestHandler):
                 "has_key": bool(cfg.get("api_key")),
             }
             return self._json(200, safe)
+
+        # /api/ai/memory
+        if parts == ["api", "ai", "memory"]:
+            return self._api_memory_get()
 
         # /api/books/<id>/file
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "books" and parts[3] == "file":
@@ -805,7 +1272,34 @@ class Handler(BaseHTTPRequestHandler):
         save_ai_config(cfg)
         self._json(200, {"ok": True})
 
-    # ---- AI 对话 (流式 SSE) ----
+    # ---- Agent 记忆 API ----
+    def _api_memory_get(self):
+        mem = MEMORY.load_memory()
+        return self._json(200, mem)
+
+    def _api_memory_add(self):
+        try:
+            payload = json.loads(self._read_body().decode("utf-8"))
+        except Exception:
+            return self._json(400, {"error": "bad json"})
+        content = (payload.get("content", "") or "").strip()
+        if not content:
+            return self._json(400, {"error": "content required"})
+        type_ = payload.get("type", "fact")
+        confidence = payload.get("confidence", 0.8)
+        source = payload.get("source", "user")
+        fact = MEMORY.add_fact(content, type_, confidence, source)
+        return self._json(200, {"ok": True, "fact": fact})
+
+    def _api_memory_delete(self, fact_id):
+        if not fact_id:
+            return self._json(400, {"error": "id required"})
+        ok = MEMORY.remove_fact(fact_id)
+        if not ok:
+            return self._json(404, {"error": "fact not found"})
+        return self._json(200, {"ok": True})
+
+    # ---- AI Agent 对话 (流式 SSE) ----
     def _api_ai_chat(self):
         try:
             payload = json.loads(self._read_body().decode("utf-8"))
@@ -820,76 +1314,133 @@ class Handler(BaseHTTPRequestHandler):
         if not messages:
             return self._json(400, {"error": "messages required"})
 
-        # 注入系统提示
-        sys_msg = {"role": "system", "content": AI_SYSTEM_PROMPT}
-        messages = [sys_msg] + messages
+        context = payload.get("context", {}) or {}
+        session_id = payload.get("session_id", "default")
 
-        # 第一轮：带工具调用
-        first_response = call_llm_api(config, messages, AI_TOOLS)
-        if "error" in first_response:
-            return self._json(500, {"error": first_response["error"]})
+        # 短期记忆裁剪 (对前端传入的纯文本历史做安全裁剪)
+        messages = MEMORY.trim_short_term(messages)
+        # 记录到短期记忆
+        for m in messages[-self._last_n(messages, 4)]:
+            MEMORY.add_short_term(session_id, m)
 
-        choice = first_response.get("choices", [{}])[0]
-        msg = choice.get("message", {})
+        # 组装上下文
+        ctx_builder = ContextBuilder(MEMORY)
+        registry = ToolRegistry()
+        register_default_tools(registry)
+        controller = AgentLoopController()
 
-        # 如果有工具调用，执行并继续对话
-        max_rounds = 5
-        while msg.get("tool_calls") and max_rounds > 0:
-            messages.append(msg)
-            for tc in msg["tool_calls"]:
-                fn_name = tc["function"]["name"]
-                fn_args = json.loads(tc["function"]["args"]) if tc["function"].get("args") else {}
-                tool_result = execute_ai_tool(fn_name, fn_args)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": tool_result,
-                })
-            max_rounds -= 1
-            # 继续调用 (不带流式, 直到没有更多工具调用)
-            first_response = call_llm_api(config, messages, AI_TOOLS)
-            if "error" in first_response:
+        llm_messages = ctx_builder.build(messages, context)
+        collected_actions = []
+        final_content = ""
+
+        # ---- Agent 循环 ----
+        while True:
+            stop, reason = controller.should_stop()
+            if stop:
+                final_content = reason
                 break
-            choice = first_response.get("choices", [{}])[0]
-            msg = choice.get("message", {})
 
-        # 最终回复：流式输出
-        final_content = msg.get("content", "")
-        if final_content:
-            # 检查是否有动作指令
-            actions = []
-            clean_content = final_content
-            if "__ACTION__:" in final_content:
-                for m in re.finditer(r'__ACTION__:open_book:(.+?)(?:\n|$)', final_content):
-                    actions.append({"type": "open_book", "book_id": m.group(1).strip()})
-                clean_content = re.sub(r'__ACTION__:open_book:.+?(?:\n|$)', '', final_content).strip()
+            controller.step += 1
+            response = call_llm_api(config, llm_messages, registry.get_schemas())
+            if "error" in response:
+                final_content = "AI 调用失败: {}".format(response["error"])
+                break
 
-            # SSE 流式输出
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.end_headers()
+            choices = response.get("choices", [])
+            if not choices:
+                final_content = "AI 返回了空响应, 请稍后重试。"
+                break
+            msg = choices[0].get("message", {})
+            tool_calls = msg.get("tool_calls")
 
-            # 逐字发送
-            chunk_size = 4
-            for i in range(0, len(clean_content), chunk_size):
-                chunk = clean_content[i:i + chunk_size]
-                data = json.dumps({"content": chunk}, ensure_ascii=False)
-                self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
-                self.wfile.flush()
+            # 没有工具调用 -> 最终回答
+            if not tool_calls:
+                final_content = msg.get("content", "") or ""
+                break
 
-            # 发送动作
-            if actions:
-                data = json.dumps({"actions": actions}, ensure_ascii=False)
-                self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
-                self.wfile.flush()
+            # 追加带 tool_calls 的 assistant 消息
+            llm_messages.append(msg)
 
-            # 结束标记
-            self.wfile.write(b"data: {\"done\": true}\n\n")
+            # 执行每个工具调用
+            for tc in tool_calls:
+                fn_name = tc.get("function", {}).get("name", "")
+                try:
+                    fn_args = json.loads(tc.get("function", {}).get("arguments") or "{}")
+                except Exception:
+                    fn_args = {}
+
+                # 重复调用检测
+                is_dup, dup_count = controller.check_duplicate(fn_name, fn_args)
+                if is_dup:
+                    result = make_tool_result(
+                        False,
+                        error="已重复调用工具 {} (相同参数 {} 次)。请直接使用之前该工具返回的结果, 不要再次调用。".format(fn_name, dup_count),
+                        retryable=False,
+                    )
+                else:
+                    controller.record_call(fn_name, fn_args)
+                    result = registry.execute(fn_name, fn_args, context)
+
+                # 失败计数
+                if not result.get("ok"):
+                    controller.record_failure()
+
+                # 序列化为工具结果内容
+                result_str = json.dumps(result, ensure_ascii=False)
+
+                # 从工具结果中收集动作指令
+                for act in extract_actions(result_str):
+                    if act not in collected_actions:
+                        collected_actions.append(act)
+
+                llm_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": result_str,
+                })
+
+            # 循环继续: 检查是否触发失败上限 (should_stop 在下一轮开头判断)
+
+        # ---- 流式输出最终回答 ----
+        # 从最终回答中提取动作指令
+        for act in extract_actions(final_content):
+            if act not in collected_actions:
+                collected_actions.append(act)
+
+        # 清除最终回答中的动作指令行
+        clean_content = re.sub(r'__ACTION__:open_book:[^\s"\'\\]+', '', final_content).strip()
+
+        if not clean_content and not collected_actions:
+            clean_content = "(AI 未返回内容, 请检查 AI 配置或稍后重试。)"
+
+        # SSE 流式
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        # 逐字发送内容
+        chunk_size = 4
+        for i in range(0, len(clean_content), chunk_size):
+            chunk = clean_content[i:i + chunk_size]
+            data = json.dumps({"content": chunk}, ensure_ascii=False)
+            self.wfile.write("data: {}\n\n".format(data).encode("utf-8"))
             self.wfile.flush()
-        else:
-            self._json(200, {"content": "", "error": "AI未返回内容"})
+
+        # 发送动作
+        if collected_actions:
+            data = json.dumps({"actions": collected_actions}, ensure_ascii=False)
+            self.wfile.write("data: {}\n\n".format(data).encode("utf-8"))
+            self.wfile.flush()
+
+        # 结束标记
+        self.wfile.write(b"data: {\"done\": true}\n\n")
+        self.wfile.flush()
+
+    @staticmethod
+    def _last_n(messages, n):
+        return min(n, len(messages))
 
     # ---- 原有 API ----
     def _api_save_progress(self, book_id):
