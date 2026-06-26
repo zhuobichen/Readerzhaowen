@@ -20,6 +20,7 @@ const SVG_GEAR = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" st
 const SVG_CLOSE = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>`;
 
 const SVG_SEND = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>`;
+const SVG_CLEAR = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 4v5h5"/></svg>`;
 
 /** 构建 FAB 与对话面板 DOM */
 function buildUI() {
@@ -44,6 +45,7 @@ function buildUI() {
         <span class="ai-title">AI 助手</span>
       </div>
       <div class="ai-header-tools">
+        <button id="ai-clear-btn" class="ai-icon-btn" title="新对话">${SVG_CLEAR}</button>
         <button id="ai-settings-btn" class="ai-icon-btn" title="设置">${SVG_GEAR}</button>
         <button id="ai-close-btn" class="ai-icon-btn" title="关闭">${SVG_CLOSE}</button>
       </div>
@@ -97,8 +99,8 @@ function bindSettings() {
       saveBtn.textContent = '保存中…';
       try {
         await API.saveAIConfig(cfg);
+        aiConfig.has_key = true;
         modal.hidden = true;
-        // 不显示 key，仅用占位提示
         keyInp.value = '';
         keyInp.placeholder = '已保存（留空则不修改）';
       } catch (e) {
@@ -111,9 +113,12 @@ function bindSettings() {
   }
 }
 
+let aiConfig = { has_key: false };  // 缓存配置状态
+
 /** 加载配置并预填设置表单 */
 async function loadConfig() {
   const cfg = await API.getAIConfig();
+  aiConfig = cfg;
   if (el.settingsEndpoint) el.settingsEndpoint.value = cfg.endpoint || '';
   if (el.settingsModel) el.settingsModel.value = cfg.model || '';
   if (el.settingsKey) {
@@ -222,10 +227,21 @@ async function send() {
   const text = el.input.value.trim();
   if (!text) return;
 
+  // 检查 AI 是否已配置
+  if (!aiConfig.has_key) {
+    addMessage('assistant', '请先配置 AI API Key。点击右上角设置按钮填写。');
+    openSettings();
+    return;
+  }
+
   // 移除建议引导
   el.messages.querySelector('.ai-suggestions')?.remove();
   addMessage('user', text);
   history.push({ role: 'user', content: text });
+  // 历史上限：保留最近 20 条（约 10 轮对话）
+  if (history.length > 20) {
+    history = history.slice(-20);
+  }
   el.input.value = '';
   autoGrow();
   sending = true;
@@ -309,10 +325,20 @@ function autoGrow() {
   el.input.style.height = Math.min(el.input.scrollHeight, 120) + 'px';
 }
 
+/** 清空对话，开始新会话 */
+function clearChat() {
+  if (history.length > 0 && !confirm('清空当前对话？')) return;
+  history = [];
+  el.messages.innerHTML = '';
+  showSuggestions();
+}
+
 function bind() {
   el.fab.addEventListener('click', togglePanel);
   el.closeBtn.addEventListener('click', closePanel);
   el.send.addEventListener('click', send);
+  const clearBtn = document.getElementById('ai-clear-btn');
+  if (clearBtn) clearBtn.addEventListener('click', clearChat);
   el.input.addEventListener('input', autoGrow);
   el.input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {

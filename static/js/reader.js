@@ -102,7 +102,7 @@ function applyTheme() {
 function updateProgress(frac, info) {
   lastFrac = frac;
   if (!seeking) {
-    ui.slider.value = frac * 100;
+    ui.slider.value = Math.max(0, Math.min(100, frac * 100));
     ui.pct.textContent = Math.round(frac * 100) + '%';
   }
   if (info != null) ui.pageInfo.textContent = info;
