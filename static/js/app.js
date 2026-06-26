@@ -94,9 +94,42 @@ function bind() {
     btnUpload.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', (e) => {
       handleUpload(e.target.files);
-      e.target.value = ''; // 清空，允许重复选同一文件
+      e.target.value = '';
     });
   }
+
+  // 拖拽导入：全屏拖入提示
+  let dragCounter = 0;
+  let dropOverlay = null;
+  window.addEventListener('dragenter', (e) => {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault();
+    dragCounter++;
+    if (!dropOverlay) {
+      dropOverlay = document.createElement('div');
+      dropOverlay.className = 'drop-overlay';
+      dropOverlay.innerHTML = '<div class="drop-inner"><svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg><p>松手导入书籍</p></div>';
+      document.body.appendChild(dropOverlay);
+    }
+  });
+  window.addEventListener('dragover', (e) => { if (e.dataTransfer?.types?.includes('Files')) e.preventDefault(); });
+  window.addEventListener('dragleave', () => {
+    dragCounter--;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      dropOverlay?.remove();
+      dropOverlay = null;
+    }
+  });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    dropOverlay?.remove();
+    dropOverlay = null;
+    const files = [...(e.dataTransfer?.files || [])];
+    const valid = files.filter(f => /\.(pdf|epub|txt|mobi|azw3|fb2|cbz|cbr|docx)$/i.test(f.name));
+    if (valid.length) handleUpload(valid);
+  });
 }
 
 bind();

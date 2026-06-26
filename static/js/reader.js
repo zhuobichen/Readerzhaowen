@@ -100,8 +100,9 @@ function applyTheme() {
 }
 
 function updateProgress(frac, info) {
+  lastFrac = frac;
   if (!seeking) {
-    ui.slider.value = Math.max(0, Math.min(100, frac * 100));
+    ui.slider.value = frac * 100;
     ui.pct.textContent = Math.round(frac * 100) + '%';
   }
   if (info != null) ui.pageInfo.textContent = info;
@@ -112,6 +113,16 @@ function scheduleSave(frac) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => active?.save(frac), 900);
 }
+
+// 即时保存：页面关闭/切换标签时，不再等防抖，直接保存
+let lastFrac = 0;
+function flushSave() {
+  if (!active) return;
+  clearTimeout(saveTimer);
+  active?.save(lastFrac);
+}
+window.addEventListener('beforeunload', flushSave);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
 
 // ----------------------------- 入口 -----------------------------
 async function open(book) {
@@ -157,6 +168,7 @@ function showError(err) {
 }
 
 function cleanup() {
+  flushSave();
   clearTimeout(saveTimer);
   if (active?.destroy) { try { active.destroy(); } catch {} }
   active = null;

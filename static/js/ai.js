@@ -137,6 +137,32 @@ function openPanel() {
   el.fab.classList.add('active');
   requestAnimationFrame(() => el.panel.classList.add('open'));
   setTimeout(() => el.input.focus(), 60);
+  // 首次打开显示建议引导
+  if (history.length === 0 && !el.messages.querySelector('.ai-suggestions')) {
+    showSuggestions();
+  }
+}
+
+/** 空状态建议 */
+function showSuggestions() {
+  const div = document.createElement('div');
+  div.className = 'ai-suggestions';
+  const tips = [
+    '总结这本书的主要内容',
+    '帮我找一本关于历史的书',
+    '这本书的作者是谁？',
+    '帮我给书架上的书分类',
+  ];
+  div.innerHTML = `<div class="ai-suggestion-title">试试这些：</div>` +
+    tips.map(t => `<button class="ai-suggestion-chip">${t}</button>`).join('');
+  div.querySelectorAll('.ai-suggestion-chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      el.input.value = btn.textContent;
+      el.input.focus();
+      div.remove();
+    });
+  });
+  el.messages.appendChild(div);
 }
 
 /** 关闭面板 */
@@ -196,6 +222,8 @@ async function send() {
   const text = el.input.value.trim();
   if (!text) return;
 
+  // 移除建议引导
+  el.messages.querySelector('.ai-suggestions')?.remove();
   addMessage('user', text);
   history.push({ role: 'user', content: text });
   el.input.value = '';
