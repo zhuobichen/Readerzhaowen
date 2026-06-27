@@ -1373,7 +1373,7 @@ def call_llm_api(config, messages, tools=None):
     api_key = config.get("api_key", "")
     model = config.get("model", "gpt-4o-mini")
 
-    body = {"model": model, "messages": messages, "max_tokens": 4096}
+    body = {"model": model, "messages": messages, "max_tokens": 8192}
     if tools:
         body["tools"] = tools
 
@@ -1423,7 +1423,7 @@ def call_llm_stream(config, messages, tools=None):
     api_key = config.get("api_key", "")
     model = config.get("model", "gpt-4o-mini")
 
-    body = {"model": model, "messages": messages, "stream": True, "max_tokens": 4096}
+    body = {"model": model, "messages": messages, "stream": True, "max_tokens": 8192}
     if tools:
         body["tools"] = tools
 
