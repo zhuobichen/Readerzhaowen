@@ -2003,10 +2003,16 @@ class Handler(BaseHTTPRequestHandler):
 
             controller.step += 1
             controller.begin_step()
+            import sys as _sys
+            print("[Agent] Step {} starting...".format(controller.step), file=_sys.stderr, flush=True)
 
+            _t0 = time.time()
             response = call_llm_api(config, llm_messages, registry.get_schemas())
+            _t1 = time.time()
+            print("[Agent] Step {} LLM call took {:.1f}s".format(controller.step, _t1 - _t0), file=_sys.stderr, flush=True)
             if "error" in response:
                 final_content = "AI 调用失败: {}".format(response["error"])
+                print("[Agent] Step {} error: {}".format(controller.step, response["error"]), file=_sys.stderr, flush=True)
                 break
 
             choices = response.get("choices", [])
@@ -2019,6 +2025,7 @@ class Handler(BaseHTTPRequestHandler):
             # 没有工具调用 -> 最终回答
             if not tool_calls:
                 final_content = msg.get("content", "") or ""
+                print("[Agent] Step {} final answer ({} chars)".format(controller.step, len(final_content)), file=_sys.stderr, flush=True)
                 break
 
             # 追加带 tool_calls 的 assistant 消息
@@ -2027,6 +2034,8 @@ class Handler(BaseHTTPRequestHandler):
             # 执行每个工具调用
             for tc in tool_calls:
                 fn_name = tc.get("function", {}).get("name", "")
+                print("[Agent] Step {} calling tool: {}".format(controller.step, fn_name), file=_sys.stderr, flush=True)
+                _tt0 = time.time()
                 try:
                     fn_args = json.loads(tc.get("function", {}).get("arguments") or "{}")
                 except Exception:
@@ -2051,6 +2060,8 @@ class Handler(BaseHTTPRequestHandler):
 
                 # 记录步骤日志 (便于调试)
                 controller.log_step(controller.step, fn_name, result_ok)
+                _tt1 = time.time()
+                print("[Agent] Step {} tool {} done ({:.1f}s) ok={}".format(controller.step, fn_name, _tt1 - _tt0, result_ok), file=_sys.stderr, flush=True)
 
                 # 序列化为工具结果内容
                 result_str = json.dumps(result, ensure_ascii=False)
@@ -2090,7 +2101,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.end_headers()
 
         # 逐字发送内容
