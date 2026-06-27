@@ -802,23 +802,23 @@ AI_SYSTEM_PROMPT = """你是「阅微」, 一个本地电子书书架的智能 A
 2. find_books - 按关键词搜索书籍
 3. get_book_content - 获取一本书的文本内容, 用于总结或分析
 4. get_book_metadata - 获取书籍元数据 (标题/作者/分类/进度)
-5. categorize_book - 为书籍设置分类
-6. list_categories - 列出所有已创建的分类
-7. rename_category - 重命名分类 (该分类下所有书籍同步更新)
-8. delete_category - 删除分类 (书籍归入未分类)
-9. delete_book - 删除一本书 (删除文件)
-10. open_book - 在阅读器中打开一本书 (前端会执行打开操作)
-11. create_note - 为一本书创建笔记
-12. remember_preference - 将用户偏好或重要事实保存到长期记忆
-13. recall_memory - 从长期记忆中检索与查询相关的记忆
-14. get_reading_context - 获取用户当前正在阅读的书籍上下文
+5. categorize_book - 为单本书设置分类
+6. batch_categorize - 批量设置多本书的分类 (一次调用完成, 当需要分类多本书时务必用这个, 不要逐本调用)
+7. list_categories - 列出所有已创建的分类
+8. rename_category - 重命名分类 (该分类下所有书籍同步更新)
+9. delete_category - 删除分类 (书籍归入未分类)
+10. delete_book - 将一本书移入回收站 (不删文件, 30天可恢复)
+11. open_book - 在阅读器中打开一本书 (前端会执行打开操作)
+12. create_note - 为一本书创建笔记
+13. remember_preference - 将用户偏好或重要事实保存到长期记忆
+14. recall_memory - 从长期记忆中检索与查询相关的记忆
+15. get_reading_context - 获取用户当前正在阅读的书籍上下文
 
 ## 行为规则
 - 用简洁友好的中文回答。
 - 当用户要求总结一本书时, 先调用 get_book_content 获取内容, 再进行总结。
-- 当用户要打开书或删除书时, 调用相应工具; 前端会根据返回的 __ACTION__ 指令执行操作。
+- **当用户要求分类多本书时, 先调用 list_books 获取书单, 然后直接用 batch_categorize 一次性完成全部分类, 不要逐本调用 categorize_book。**
 - 如果用户提到偏好或重要信息, 主动调用 remember_preference 保存到长期记忆。
-- 回答问题前可先调用 recall_memory 检索是否有相关记忆, 也可调用 get_reading_context 了解用户当前正在读什么。
 - 不要用相同参数重复调用同一个工具, 请直接使用之前返回的结果。
 - 工具调用失败时不要无限重试, 基于已有信息回答即可。
 - 每个工具返回统一结构 {ok, data, error, retryable}; ok 为 false 时表示失败。
@@ -924,6 +924,33 @@ def _tool_categorize_book(args, context):
         "bookId": bid,
         "category": cat,
         "message": "已将《{}》分类为「{}」".format(meta.get("title", bid), cat),
+    })
+
+
+def _tool_batch_categorize(args, context):
+    """批量设置多本书的分类, 一次调用完成."""
+    assignments = args.get("assignments", [])
+    if not assignments:
+        return make_tool_result(False, error="缺少 assignments 参数", retryable=False)
+    lib = load_library()
+    cats = lib.setdefault("categories", [])
+    results = []
+    for item in assignments:
+        bid = item.get("book_id", "")
+        cat = item.get("category", "")
+        if not book_path(bid):
+            results.append({"book_id": bid, "ok": False, "error": "找不到"})
+            continue
+        meta = lib.setdefault("books", {}).setdefault(bid, {})
+        meta["category"] = cat
+        if cat and cat not in cats:
+            cats.append(cat)
+        results.append({"book_id": bid, "ok": True, "category": cat, "title": meta.get("title", bid)})
+    save_library(lib)
+    return make_tool_result(True, data={
+        "results": results,
+        "count": len(results),
+        "message": "已批量分类 {} 本书".format(len(results)),
     })
 
 
@@ -1206,6 +1233,29 @@ TOOL_DEFS = [
         "handler": _tool_categorize_book,
     },
     {
+        "name": "batch_categorize",
+        "description": "批量设置多本书的分类(一次调用完成, 比逐本调用快很多)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "assignments": {
+                    "type": "array",
+                    "description": "分类分配列表",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "book_id": {"type": "string", "description": "书籍ID"},
+                            "category": {"type": "string", "description": "分类名称"},
+                        },
+                        "required": ["book_id", "category"],
+                    },
+                },
+            },
+            "required": ["assignments"],
+        },
+        "handler": _tool_batch_categorize,
+    },
+    {
         "name": "list_categories",
         "description": "列出所有已创建的分类及每个分类的书籍数量",
         "parameters": {"type": "object", "properties": {}},
@@ -1478,6 +1528,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, code, obj, extra_headers=None):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), headers=extra_headers)
+
+    def _sse_write(self, data):
+        """发送 SSE 数据块"""
+        try:
+            payload = json.dumps(data, ensure_ascii=False)
+            self.wfile.write("data: {}\n\n".format(payload).encode("utf-8"))
+            self.wfile.flush()
+        except Exception:
+            pass
 
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -1995,6 +2054,13 @@ class Handler(BaseHTTPRequestHandler):
         final_content = ""
 
         # ---- Agent 循环 ----
+        # 先发送 SSE 头部
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
         while True:
             stop, reason = controller.should_stop()
             if stop:
@@ -2005,6 +2071,9 @@ class Handler(BaseHTTPRequestHandler):
             controller.begin_step()
             import sys as _sys
             print("[Agent] Step {} starting...".format(controller.step), file=_sys.stderr, flush=True)
+
+            # 发送步骤状态到前端
+            self._sse_write({"step": controller.step, "type": "thinking", "content": "正在思考..."})
 
             _t0 = time.time()
             response = call_llm_api(config, llm_messages, registry.get_schemas())
@@ -2025,6 +2094,10 @@ class Handler(BaseHTTPRequestHandler):
             # 没有工具调用 -> 最终回答
             if not tool_calls:
                 final_content = msg.get("content", "") or ""
+                # 发送推理过程(如果有)
+                reasoning = msg.get("reasoning_content", "") or ""
+                if reasoning:
+                    self._sse_write({"type": "reasoning", "content": reasoning})
                 print("[Agent] Step {} final answer ({} chars)".format(controller.step, len(final_content)), file=_sys.stderr, flush=True)
                 break
 
@@ -2035,6 +2108,9 @@ class Handler(BaseHTTPRequestHandler):
             for tc in tool_calls:
                 fn_name = tc.get("function", {}).get("name", "")
                 print("[Agent] Step {} calling tool: {}".format(controller.step, fn_name), file=_sys.stderr, flush=True)
+                # 发送工具调用状态
+                tool_label = {"list_books": "查看书架", "set_book_category": "设置分类", "list_categories": "查看分类", "search_books": "搜索书籍", "get_book_info": "获取书籍信息"}.get(fn_name, fn_name)
+                self._sse_write({"type": "tool", "tool": fn_name, "label": tool_label})
                 _tt0 = time.time()
                 try:
                     fn_args = json.loads(tc.get("function", {}).get("arguments") or "{}")
@@ -2097,14 +2173,7 @@ class Handler(BaseHTTPRequestHandler):
         if not clean_content and not collected_actions:
             clean_content = "(AI 未返回内容, 请检查 AI 配置或稍后重试。)"
 
-        # SSE 流式
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self.end_headers()
-
-        # 逐字发送内容
+        # 逐字发送最终内容
         chunk_size = 4
         for i in range(0, len(clean_content), chunk_size):
             chunk = clean_content[i:i + chunk_size]

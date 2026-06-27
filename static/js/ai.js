@@ -5,6 +5,41 @@ let history = [];        // 对话历史 [{role, content}]
 let sending = false;     // 是否正在发送/接收
 let el = {};             // DOM 元素缓存
 let contextProvider = null; // 回调：获取当前阅读上下文
+let statusIcon = null;   // 状态指示器图标
+
+// ---- 聊天记录持久化 ----
+const HISTORY_KEY = 'reader-ai-history';
+const HISTORY_MAX = 20;
+
+function saveHistory() {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(-HISTORY_MAX)));
+  } catch {}
+}
+
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (raw) {
+      history = JSON.parse(raw);
+      // 重新渲染历史消息
+      for (const msg of history) {
+        if (msg.role === 'user') {
+          addMessage('user', msg.content);
+        } else {
+          addMessage('assistant', msg.content);
+        }
+      }
+    }
+  } catch {
+    history = [];
+  }
+}
+
+function clearHistory() {
+  history = [];
+  try { localStorage.removeItem(HISTORY_KEY); } catch {}
+}
 
 const SVG_ROBOT = `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
   <rect x="4" y="7" width="16" height="12" rx="2.5"/>
@@ -246,6 +281,7 @@ async function send() {
   if (history.length > 20) {
     history = history.slice(-20);
   }
+  saveHistory();
   el.input.value = '';
   autoGrow();
   sending = true;
@@ -254,6 +290,7 @@ async function send() {
   showTyping();
   let aiBubble = null;
   let firstChunk = true;
+  let statusEl = null;
 
   // 获取当前阅读上下文
   const ctx = contextProvider ? contextProvider() : {};
@@ -278,9 +315,54 @@ async function send() {
         let data;
         try { data = JSON.parse(payload); } catch { continue; }
 
-        if (data.content) {
+        // 思考状态
+        if (data.type === 'thinking') {
+          if (firstChunk) {
+            removeTyping();
+            firstChunk = false;
+            // 创建状态提示
+            const wrap = document.createElement('div');
+            wrap.className = 'ai-msg ai-msg-ai';
+            wrap.innerHTML = `<div class="ai-avatar">${SVG_ROBOT}</div><div class="ai-bubble ai-bubble-ai ai-status-bubble"><span class="ai-status-icon">○</span> <span class="ai-status-text">${data.content}</span></div>`;
+            el.messages.appendChild(wrap);
+            statusEl = wrap.querySelector('.ai-status-text');
+            statusIcon = wrap.querySelector('.ai-status-icon');
+            scrollToBottom();
+          }
+        }
+        // 工具调用
+        if (data.type === 'tool') {
+          if (statusEl) {
+            statusEl.textContent = data.label || data.tool;
+            if (statusIcon) statusIcon.textContent = '◉';
+          }
+        }
+        // 推理过程
+        if (data.type === 'reasoning') {
+          if (statusEl) {
+            const statusWrap = statusEl.closest('.ai-msg');
+            statusWrap?.remove();
+            statusEl = null;
+          }
           if (firstChunk) { removeTyping(); firstChunk = false; }
-          if (!aiBubble) aiBubble = addMessage('assistant', '');
+          // 显示推理过程(折叠)
+          const wrap = document.createElement('div');
+          wrap.className = 'ai-msg ai-msg-ai';
+          wrap.innerHTML = `<div class="ai-avatar">${SVG_ROBOT}</div><div class="ai-bubble ai-bubble-ai ai-reasoning-bubble"><details><summary class="ai-reasoning-toggle">💭 推理过程</summary><div class="ai-reasoning-content"></div></details></div>`;
+          wrap.querySelector('.ai-reasoning-content').textContent = data.content;
+          el.messages.appendChild(wrap);
+          scrollToBottom();
+        }
+        // 正式回答内容 (跳过有 type 的消息, 避免思考/推理文本混入)
+        if (data.content && !data.type) {
+          if (statusEl) {
+            statusEl.closest('.ai-msg')?.remove();
+            statusEl = null;
+          }
+          if (firstChunk) { removeTyping(); firstChunk = false; }
+          if (!aiBubble) {
+            aiBubble = addMessage('assistant', '');
+          }
           aiBubble.textContent += data.content;
           scrollToBottom();
         }
@@ -293,10 +375,15 @@ async function send() {
       }
     }
     removeTyping();
+    // 清理状态提示
+    if (statusEl) {
+      statusEl.closest('.ai-msg')?.remove();
+    }
 
     // 收集完整 AI 回复到历史
     if (aiBubble) {
       history.push({ role: 'assistant', content: aiBubble.textContent });
+      saveHistory();
     } else if (firstChunk) {
       // 未收到任何内容
       removeTyping();
@@ -304,6 +391,7 @@ async function send() {
     }
   } catch (e) {
     removeTyping();
+    if (statusEl) statusEl.closest('.ai-msg')?.remove();
     if (!aiBubble) aiBubble = addMessage('assistant', '');
     aiBubble.textContent += `\n[出错] ${e.message || e}`;
   } finally {
@@ -332,7 +420,7 @@ function autoGrow() {
 /** 清空对话，开始新会话 */
 function clearChat() {
   if (history.length > 0 && !confirm('清空当前对话？')) return;
-  history = [];
+  clearHistory();
   el.messages.innerHTML = '';
   showSuggestions();
 }
@@ -361,6 +449,7 @@ function init() {
   bindSettings();
   bind();
   loadConfig();
+  loadHistory(); // 恢复历史聊天记录
 }
 
 function setContextProvider(fn) {
