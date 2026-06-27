@@ -220,12 +220,16 @@ class TokenEstimator:
 
 # ---- 0b. ContextCompressor ----
 class ContextCompressor:
-    """上下文压缩: 当消息历史超 token 预算时, 调 LLM 生成摘要替换旧消息"""
+    """上下文压缩: 当消息历史超 token 预算时, 调 LLM 生成结构化摘要替换旧消息
+
+    压缩原则: 压缩后的信息必须保证 Agent 能无缝继续下一阶段工作。
+    即: 保留用户意图、已完成操作及关键结果、未完成任务、工具调用参数与返回数据。
+    """
 
     TOKEN_BUDGET = 12000       # 总 token 预算 (留给模型回复空间)
     SUMMARY_THRESHOLD = 8000  # 超过此值触发压缩
-    KEEP_RECENT = 6            # 压缩时保留最近 N 条消息
-    KEEP_SYSTEM = True        # 保留 system 消息
+    KEEP_RECENT = 6            # 压缩时保留最近 N 条消息 (不截断)
+    TOOL_RESULT_KEEP = 800     # 工具返回结果在摘要请求中的保留长度 (字符)
 
     def __init__(self, config):
         self.config = config
@@ -235,20 +239,43 @@ class ContextCompressor:
         return TokenEstimator.estimate_messages(messages) > self.SUMMARY_THRESHOLD
 
     def compress(self, messages):
-        """压缩消息历史: 保留 system + 最近 N 条, 中间部分生成摘要"""
+        """压缩消息历史: 保留 system + 最近 N 条, 中间部分生成结构化摘要
+
+        摘要包含:
+        1. 用户核心意图
+        2. 已调用工具及其参数
+        3. 工具返回的关键数据 (不截断重要结果)
+        4. Agent 已得出的结论
+        5. 未完成的任务 / 下一步计划
+        """
         if not self.should_compress(messages):
             return messages
 
-        # 分离 system 消息
+        # 分离 system 消息和工具调用链
         system_msgs = [m for m in messages if m.get("role") == "system"]
         non_system = [m for m in messages if m.get("role") != "system"]
 
         if len(non_system) <= self.KEEP_RECENT:
             return messages
 
-        # 要压缩的部分
-        to_compress = non_system[:-self.KEEP_RECENT]
-        keep_recent = non_system[-self.KEEP_RECENT:]
+        # 智能选择保留边界: 不在 tool_calls → tool 的中间截断
+        split_idx = len(non_system) - self.KEEP_RECENT
+        # 向前调整, 确保不切断 tool_calls→tool 配对
+        while split_idx > 0:
+            msg = non_system[split_idx]
+            role = msg.get("role", "")
+            if role == "tool":
+                # 检查前一条是否有对应的 tool_calls
+                prev = non_system[split_idx - 1] if split_idx > 0 else None
+                if prev and prev.get("tool_calls"):
+                    split_idx -= 2
+                    continue
+            break
+        to_compress = non_system[:split_idx]
+        keep_recent = non_system[split_idx:]
+
+        if not to_compress:
+            return messages
 
         # 构建摘要请求
         summary_prompt = self._build_summary_prompt(to_compress)
@@ -257,26 +284,106 @@ class ContextCompressor:
         if summary:
             summary_msg = {
                 "role": "system",
-                "content": "[对话摘要] 以下是之前对话的要点:\n{}".format(summary),
+                "content": "[对话摘要 - 压缩自 {} 条历史消息]\n{}".format(
+                    len(to_compress), summary),
             }
             return system_msgs + [summary_msg] + keep_recent
         else:
-            # 摘要失败, 降级为简单裁剪
+            # 摘要失败, 降级为简单裁剪 + 关键信息提取
+            key_info = self._extract_key_info(to_compress)
             note = {"role": "system",
-                    "content": "[历史已裁剪] 之前 {} 条消息已省略".format(len(to_compress))}
+                    "content": "[历史已裁剪] 之前 {} 条消息已省略。\n{}".format(
+                        len(to_compress), key_info)}
             return system_msgs + [note] + keep_recent
 
     def _build_summary_prompt(self, messages):
+        """构建摘要请求: 要求 LLM 生成结构化摘要, 保留 Agent 继续工作所需的信息"""
         lines = []
         for m in messages:
             role = m.get("role", "unknown")
             content = m.get("content", "")
+
+            if role == "tool":
+                # 工具返回结果: 尝试解析 JSON, 提取关键数据
+                tool_content = self._summarize_tool_result(content)
+                lines.append("[工具返回] {}".format(tool_content))
+
+            elif m.get("tool_calls"):
+                # 工具调用: 保留工具名和参数
+                parts = []
+                for tc in m["tool_calls"]:
+                    fn_name = tc.get("function", {}).get("name", "")
+                    fn_args = tc.get("function", {}).get("arguments", "")
+                    parts.append("{}({})".format(fn_name, fn_args))
+                lines.append("[Agent调用工具] {}".format(" | ".join(parts)))
+
+            elif role == "user":
+                lines.append("用户: {}".format(content))
+
+            elif role == "assistant":
+                lines.append("Agent: {}".format(content))
+
+            else:
+                lines.append("{}: {}".format(role, content))
+
+        return (
+            "你需要将以下对话历史压缩为结构化摘要, 要求:\n"
+            "1. 保留用户的原始意图和请求\n"
+            "2. 列出已调用的工具名及其参数\n"
+            "3. 保留工具返回的关键数据 (如书籍列表、笔记内容、分类等)\n"
+            "4. 记录 Agent 已得出的结论或已完成的操作\n"
+            "5. 如果有未完成的任务, 明确写出下一步该做什么\n"
+            "6. 摘要长度控制在 400 字以内\n\n"
+            "对话历史:\n" + "\n".join(lines))
+
+    def _summarize_tool_result(self, content):
+        """提取工具返回结果中的关键数据, 避免截断丢失信息"""
+        try:
+            result = json.loads(content)
+            if result.get("ok"):
+                data = result.get("data", {})
+                # 书籍列表: 保留标题和 ID
+                if "books" in data:
+                    books = data["books"]
+                    items = ["《{}》({})".format(
+                        b.get("title", b.get("id", "")), b.get("id", ""))
+                        for b in books[:20]]
+                    return "找到 {} 本书: {}".format(
+                        data.get("count", len(books)),
+                        "; ".join(items) + ("..." if len(books) > 20 else ""))
+                # 书籍内容: 保留前 500 字
+                if "content" in data:
+                    return "书籍文本(前500字): {}".format(data["content"][:500])
+                # 分类列表
+                if "categories" in data:
+                    cats = data["categories"]
+                    return "分类: {}".format(
+                        "; ".join("{}({}本)".format(c["name"], c["count"]) for c in cats))
+                # 其他数据: 保留 JSON
+                return json.dumps(data, ensure_ascii=False)[:600]
+            else:
+                return "失败: {}".format(result.get("error", "未知错误"))
+        except (json.JSONDecodeError, TypeError):
+            return content[:600] if content else "(空)"
+
+    def _extract_key_info(self, messages):
+        """降级方案: 摘要失败时, 从消息中提取关键信息 (不调 LLM)"""
+        user_msgs = []
+        tool_calls = []
+        for m in messages:
+            if m.get("role") == "user" and m.get("content"):
+                user_msgs.append(m["content"][:200])
             if m.get("tool_calls"):
-                content = "[调用了工具: {}]".format(
-                    ", ".join(tc.get("function", {}).get("name", "") for tc in m["tool_calls"]))
-            lines.append("{}: {}".format(role, content[:500]))
-        return ("请用中文将以下对话摘要为 200 字以内的要点, "
-                "保留关键信息和工具调用结果:\n\n" + "\n".join(lines))
+                for tc in m["tool_calls"]:
+                    tool_calls.append("{}({})".format(
+                        tc.get("function", {}).get("name", ""),
+                        tc.get("function", {}).get("arguments", "")[:100]))
+        parts = []
+        if user_msgs:
+            parts.append("用户请求: " + " | ".join(user_msgs[:3]))
+        if tool_calls:
+            parts.append("已调用工具: " + " | ".join(tool_calls[:5]))
+        return "\n".join(parts) if parts else "(无关键信息)"
 
     def _generate_summary(self, prompt):
         """调用 LLM 生成摘要"""
