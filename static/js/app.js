@@ -110,8 +110,101 @@ function applyTheme(theme) {
   }
 }
 
+// ---- 回收站 ----
+function initTrash() {
+  const btn = document.getElementById('btn-trash');
+  if (btn) btn.addEventListener('click', openTrashModal);
+}
+
+async function openTrashModal() {
+  // 关闭已有
+  document.getElementById('trash-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'trash-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-box trash-modal-box">
+      <div class="modal-header">
+        <h3>回收站</h3>
+        <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">✕</button>
+      </div>
+      <div class="trash-list" id="trash-list"><p style="text-align:center;color:var(--text-mute);padding:40px 0;">加载中...</p></div>
+      <div class="trash-footer" id="trash-footer" style="display:none;">
+        <button class="btn-text" id="btn-empty-trash">清空过期项</button>
+      </div>
+    </div>`;
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+  await loadTrashList();
+}
+
+async function loadTrashList() {
+  const listEl = document.getElementById('trash-list');
+  const footerEl = document.getElementById('trash-footer');
+  try {
+    const data = await API.getTrash();
+    const items = data.trash || [];
+    if (!items.length) {
+      listEl.innerHTML = '<p style="text-align:center;color:var(--text-mute);padding:40px 0;">回收站为空</p>';
+      return;
+    }
+    listEl.innerHTML = items.map(item => {
+      const title = decodeURIComponent(item.title || item.bookId || '');
+      const days = Math.ceil(item.remainSeconds / 86400);
+      const date = new Date(item.deletedAt * 1000).toLocaleDateString('zh-CN');
+      return `<div class="trash-item">
+        <div class="trash-item-info">
+          <span class="trash-item-title">${escapeHtmlSafe(title)}</span>
+          <span class="trash-item-meta">${date} · 剩余 ${days} 天</span>
+        </div>
+        <div class="trash-item-actions">
+          <button class="btn-sm" data-act="restore" data-id="${escapeHtmlSafe(item.bookId)}">恢复</button>
+          <button class="btn-sm btn-danger" data-act="permanent" data-id="${escapeHtmlSafe(item.bookId)}">永久删除</button>
+        </div>
+      </div>`;
+    }).join('');
+    footerEl.style.display = 'flex';
+    // 绑定按钮
+    listEl.querySelectorAll('[data-act="restore"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        try {
+          await API.restoreBook(id);
+          loadTrashList();
+          refreshShelf();
+          refreshCategories();
+        } catch (e) { alert(e.message || '恢复失败'); }
+      });
+    });
+    listEl.querySelectorAll('[data-act="permanent"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        if (!confirm('永久删除后无法恢复，确定吗？')) return;
+        try {
+          await API.deleteBookPermanent(id);
+          loadTrashList();
+        } catch (e) { alert(e.message || '永久删除失败'); }
+      });
+    });
+    const emptyBtn = document.getElementById('btn-empty-trash');
+    if (emptyBtn) emptyBtn.onclick = async () => {
+      try {
+        await API.emptyTrash();
+        loadTrashList();
+      } catch (e) { alert(e.message || '清空失败'); }
+    };
+  } catch (e) {
+    listEl.innerHTML = `<p style="text-align:center;color:var(--danger);">加载失败: ${e.message}</p>`;
+  }
+}
+
+function escapeHtmlSafe(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
 function bind() {
   initTheme();
+  initTrash();
   Reader.init();
   Notes.init();
   AI.init();
@@ -130,15 +223,18 @@ function bind() {
     });
   }
 
-  // 拖拽导入：仅对文件类型触发，书籍拖拽(text/plain)不显示
+  // 拖拽导入：仅书架视图+仅文件类型才触发
   let dragCounter = 0;
   let dropOverlay = null;
   function isFileDrag(e) {
-    // Files 类型拖拽才显示导入提示
     return e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files');
   }
+  function isShelfView() {
+    const shelf = document.getElementById('view-shelf');
+    return shelf && !shelf.hidden;
+  }
   window.addEventListener('dragenter', (e) => {
-    if (!isFileDrag(e)) return;
+    if (!isFileDrag(e) || !isShelfView()) return;
     e.preventDefault();
     dragCounter++;
     if (!dropOverlay) {
@@ -148,7 +244,7 @@ function bind() {
       document.body.appendChild(dropOverlay);
     }
   });
-  window.addEventListener('dragover', (e) => { if (isFileDrag(e)) e.preventDefault(); });
+  window.addEventListener('dragover', (e) => { if (isFileDrag(e) && isShelfView()) e.preventDefault(); });
   window.addEventListener('dragleave', () => {
     dragCounter--;
     if (dragCounter <= 0) {
@@ -158,7 +254,7 @@ function bind() {
     }
   });
   window.addEventListener('drop', (e) => {
-    if (!isFileDrag(e)) return;
+    if (!isFileDrag(e) || !isShelfView()) return;
     e.preventDefault();
     dragCounter = 0;
     dropOverlay?.remove();

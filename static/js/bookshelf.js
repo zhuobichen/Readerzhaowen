@@ -158,9 +158,46 @@ function renderCatItem(label, cat, count, active) {
   </div>`;
 }
 
+/** 自定义输入对话框 (替代原生 prompt) */
+function showInputDialog(title, placeholder, defaultValue) {
+  return new Promise((resolve) => {
+    document.getElementById('input-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'input-modal';
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal-box" style="width:360px;">
+        <div class="modal-header">
+          <h3>${escapeHtml(title)}</h3>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <input type="text" id="input-modal-field" placeholder="${escapeHtml(placeholder || '')}" value="${escapeHtml(defaultValue || '')}">
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" data-act="cancel">取消</button>
+          <button class="btn-primary" data-act="ok">确定</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const field = modal.querySelector('#input-modal-field');
+    field.focus();
+    field.select();
+    const close = (val) => { modal.remove(); resolve(val); };
+    modal.querySelector('.modal-close').onclick = () => close(null);
+    modal.querySelector('[data-act="cancel"]').onclick = () => close(null);
+    modal.querySelector('[data-act="ok"]').onclick = () => close(field.value);
+    field.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') close(field.value);
+      if (e.key === 'Escape') close(null);
+    });
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(null); });
+  });
+}
+
 /** 新建分类 */
 async function addCategory() {
-  const name = prompt('请输入分类名称：');
+  const name = await showInputDialog('新建分类', '请输入分类名称', '');
   if (!name || !name.trim()) return;
   try {
     await API.createCategory(name.trim());
@@ -186,7 +223,7 @@ function showCatContextMenu(x, y, catName) {
     <button class="ctx-danger" data-act="del">删除分类</button>`;
   menu.querySelector('[data-act="rename"]').addEventListener('click', async () => {
     closeMenus();
-    const newName = prompt('重命名分类为：', catName);
+    const newName = await showInputDialog('重命名分类', '输入新名称', catName);
     if (!newName || !newName.trim() || newName.trim() === catName) return;
     try {
       await API.renameCategory(catName, newName.trim());
@@ -444,7 +481,7 @@ function showContextMenu(x, y, book) {
   menu.innerHTML = `
     <button data-act="cat">设置分类</button>
     <hr>
-    <button class="ctx-danger" data-act="del">删除书籍</button>`;
+    <button class="ctx-danger" data-act="del">移出书架</button>`;
   menu.querySelector('[data-act="cat"]').addEventListener('click', () => {
     closeMenus();
     const r = menu.getBoundingClientRect();
@@ -452,12 +489,13 @@ function showContextMenu(x, y, book) {
   });
   menu.querySelector('[data-act="del"]').addEventListener('click', async () => {
     closeMenus();
-    if (!confirm(`确定删除《${book.title || book.name}》？\n文件将被永久移除。`)) return;
+    if (!confirm(`确定将《${book.title || book.name}》移出书架？\n30天内可在回收站恢复。`)) return;
     try {
       await API.deleteBook(book.id);
       load();
+      refreshCategories();
     } catch (e) {
-      alert(e.message || '删除失败');
+      alert(e.message || '移出书架失败');
     }
   });
   document.body.appendChild(menu);

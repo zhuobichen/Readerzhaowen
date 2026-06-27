@@ -126,9 +126,37 @@ const API = {
   async deleteBook(bookId) {
     try {
       const r = await fetch(`/api/books/${encodeURIComponent(bookId)}`, { method: 'DELETE' });
-      if (!r.ok) throw new Error('删除书籍失败');
+      if (!r.ok) throw new Error('移出书架失败');
       return await r.json();
     } catch (e) { throw e; }
+  },
+
+  async getTrash() {
+    const r = await fetch('/api/trash');
+    if (!r.ok) throw new Error('获取回收站失败');
+    return await r.json();
+  },
+
+  async restoreBook(bookId) {
+    const r = await fetch('/api/trash/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ book_id: bookId }),
+    });
+    if (!r.ok) throw new Error('恢复失败');
+    return await r.json();
+  },
+
+  async deleteBookPermanent(bookId) {
+    const r = await fetch(`/api/trash/${encodeURIComponent(bookId)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error('永久删除失败');
+    return await r.json();
+  },
+
+  async emptyTrash() {
+    const r = await fetch('/api/trash/empty', { method: 'POST' });
+    if (!r.ok) throw new Error('清空回收站失败');
+    return await r.json();
   },
 
   async uploadBook(file) {

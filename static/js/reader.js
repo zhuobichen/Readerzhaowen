@@ -228,8 +228,14 @@ class PDFReader {
     this.render();
   }
   updateZoomLabel() { ui.zoomLvl.textContent = Math.round(this.scale * 100) + '%'; }
-  next() { if (this.page < this.total) { this.page++; this.render(); } }
-  prev() { if (this.page > 1) { this.page--; this.render(); } }
+  next() { if (this.page < this.total) { this.page++; this._flipAnim('forward'); this.render(); } }
+  prev() { if (this.page > 1) { this.page--; this._flipAnim('back'); this.render(); } }
+  _flipAnim(dir) {
+    if (!this.canvas) return;
+    this.canvas.classList.remove('flip-anim', 'flip-back');
+    void this.canvas.offsetWidth; // 触发重排
+    this.canvas.classList.add(dir === 'forward' ? 'flip-anim' : 'flip-back');
+  }
   seek(f) { this.page = Math.max(1, Math.min(this.total, Math.round(f * (this.total - 1)) + 1)); this.render(); }
   seekByPage(page) { this.page = Math.max(1, Math.min(this.total, page)); this.render(); }
   getLocation() { return { page: this.page, progress: (this.page - 1) / Math.max(1, this.total - 1), label: `第${this.page}页` }; }
@@ -312,8 +318,20 @@ class EPUBReader {
     const pct = Math.round(frac * 100);
     updateProgress(frac, `${pct}% · 第 ${Math.max(1, start.location || 1)} 处`);
   }
-  next() { this.rendition.next(); }
-  prev() { this.rendition.prev(); }
+  next() { this._epubAnim('forward'); this.rendition.next(); }
+  prev() { this._epubAnim('back'); this.rendition.prev(); }
+  _epubAnim(dir) {
+    const viewer = document.getElementById('epub-viewer');
+    if (!viewer) return;
+    const child = viewer.firstElementChild;
+    if (!child) return;
+    child.style.opacity = '0';
+    child.style.transform = dir === 'forward' ? 'translateX(30px)' : 'translateX(-30px)';
+    requestAnimationFrame(() => {
+      child.style.opacity = '1';
+      child.style.transform = 'translateX(0)';
+    });
+  }
   seek(f) {
     if (!this.bookObj.locations.length()) return;
     const cfi = this.bookObj.locations.cfiFromPercentage(Math.min(0.999, Math.max(0, f)));
