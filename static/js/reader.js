@@ -28,7 +28,8 @@ let active = null;     // 当前阅读器实例
 let seeking = false;   // 用户正在拖动进度条
 let saveTimer = null;
 let lightTheme = false;
-let scrollMode = localStorage.getItem('reader-mode') === 'vertical';
+// 阅读模式: 0=horizontal(左右翻页), 1=vertical(上下分页), 2=scroll(卷轴连续滚动)
+let readerMode = parseInt(localStorage.getItem('reader-mode') || '0');
 
 function showTool(groups) {
   // groups: {zoom, fit, theme, mode}
@@ -39,22 +40,27 @@ function showTool(groups) {
 }
 
 function applyMode() {
-  ui.stage.dataset.mode = scrollMode ? 'vertical' : 'horizontal';
+  const modeNames = ['horizontal', 'vertical', 'scroll'];
+  ui.stage.dataset.mode = modeNames[readerMode];
   updateModeIcon();
-  active?.setMode?.(scrollMode);
+  active?.setMode?.(readerMode);
 }
 
 function updateModeIcon() {
   const svg = ui.mode.querySelector('svg');
-  if (scrollMode) {
-    // 上下滚动: 双向下箭头(表示滚动方向)
-    svg.innerHTML = '<path d="M7 13l5 5 5-5"/><path d="M7 6l5 5 5-5"/>';
-    svg.setAttribute('stroke-width', '2');
-    ui.mode.title = '当前: 上下滚动 | 点击切换为左右翻页';
-  } else {
-    // 左右翻页: 左右双向箭头(表示翻页方向)
+  if (readerMode === 0) {
+    // 左右翻页: 左右双向箭头
     svg.innerHTML = '<path d="M9 7l-5 5 5 5"/><path d="M15 7l5 5-5 5"/>';
-    ui.mode.title = '当前: 左右翻页 | 点击切换为上下滚动';
+    ui.mode.title = '当前: 左右翻页 | 点击切换为上下分页';
+  } else if (readerMode === 1) {
+    // 上下分页: 双向下箭头
+    svg.innerHTML = '<path d="M7 13l5 5 5-5"/><path d="M7 6l5 5 5-5"/>';
+    ui.mode.title = '当前: 上下分页 | 点击切换为卷轴模式';
+  } else {
+    // 卷轴模式: 三条横线(表示连续滚动)
+    svg.innerHTML = '<path d="M4 8h16M4 12h16M4 16h16"/>';
+    svg.setAttribute('stroke-width', '2');
+    ui.mode.title = '当前: 卷轴模式 | 点击切换为左右翻页';
   }
 }
 
@@ -66,8 +72,8 @@ function bindControls() {
   ui.fit.addEventListener('click', () => active?.fit?.());
   ui.theme.addEventListener('click', () => { lightTheme = !lightTheme; applyTheme(); });
   ui.mode.addEventListener('click', () => {
-    scrollMode = !scrollMode;
-    localStorage.setItem('reader-mode', scrollMode ? 'vertical' : 'horizontal');
+    readerMode = (readerMode + 1) % 3;
+    localStorage.setItem('reader-mode', String(readerMode));
     applyMode();
   });
   ui.slider.addEventListener('input', () => {
@@ -85,7 +91,9 @@ function bindControls() {
 function onKey(e) {
   if (!active) return;
   if (location.hash.startsWith('#/book/')) {
-    if (scrollMode) {
+    // 卷轴模式用上下方向键滚动, 不拦截
+    if (readerMode === 2) return;
+    if (readerMode === 1) {
       if (e.key === 'ArrowDown') { e.preventDefault(); active.next(); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); active.prev(); }
     } else {
@@ -185,7 +193,7 @@ function escapeHtml(s) {
 //  PDF 阅读器
 // =====================================================================
 class PDFReader {
-  constructor(book, resume) { this.book = book; this.resume = resume; this.page = 1; this.scale = 1.2; this.pdf = null; this.rendering = false; this.pending = null; }
+  constructor(book, resume) { this.book = book; this.resume = resume; this.page = 1; this.scale = 1.2; this.pdf = null; this.rendering = false; this.pending = null; this._scrollMode = false; this._scrollCanvases = new Map(); this._scrollObserver = null; }
   async start() {
     showTool({ zoom: true, fit: true, theme: false, mode: true });
     this.canvas = document.createElement('canvas');
@@ -195,7 +203,104 @@ class PDFReader {
     this.total = this.pdf.numPages;
     if (this.resume?.page) this.page = Math.min(this.resume.page, this.total);
     await this.fit();
-    window.addEventListener('resize', this._onResize = () => this.fit());
+    window.addEventListener('resize', this._onResize = () => { if (this._scrollMode) this._scrollFit(); else this.fit(); });
+  }
+  // ---- 卷轴模式: 连续渲染所有页面 ----
+  async _enterScrollMode() {
+    this._scrollMode = true;
+    // 移除单页 canvas
+    this.canvas?.remove();
+    this.canvas = null;
+    // 创建滚动容器
+    this._scrollContainer = document.createElement('div');
+    this._scrollContainer.className = 'pdf-scroll-container';
+    ui.area.appendChild(this._scrollContainer);
+    // 计算缩放
+    const basePage = await this.pdf.getPage(1);
+    const base = basePage.getViewport({ scale: 1 });
+    const avail = ui.area.clientWidth - 48;
+    this.scale = avail / base.width;
+    // 为每页创建占位 div + canvas
+    for (let i = 1; i <= this.total; i++) {
+      const wrap = document.createElement('div');
+      wrap.className = 'pdf-scroll-page';
+      wrap.dataset.page = i;
+      const canvas = document.createElement('canvas');
+      wrap.appendChild(canvas);
+      this._scrollContainer.appendChild(wrap);
+      this._scrollCanvases.set(i, { wrap, canvas, rendered: false });
+    }
+    // IntersectionObserver 懒渲染
+    this._scrollObserver = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          const pg = parseInt(e.target.dataset.page);
+          this._renderScrollPage(pg);
+        }
+      });
+    }, { root: ui.area, rootMargin: '200px 0px' });
+    this._scrollCanvases.forEach(({ wrap }) => this._scrollObserver.observe(wrap));
+    // 滚动到当前页
+    const target = this._scrollCanvases.get(this.page);
+    if (target) target.wrap.scrollIntoView();
+    // 监听滚动更新进度
+    this._scrollContainer.addEventListener('scroll', this._onScrollView = () => this._onScrollUpdate());
+    this._scrollCanvases.forEach(({ wrap }) => this._scrollObserver.observe(wrap));
+  }
+  async _renderScrollPage(pageNum) {
+    const entry = this._scrollCanvases.get(pageNum);
+    if (!entry || entry.rendered) return;
+    entry.rendered = true;
+    try {
+      const page = await this.pdf.getPage(pageNum);
+      const vp = page.getViewport({ scale: this.scale * (window.devicePixelRatio || 1) });
+      const { canvas } = entry;
+      canvas.width = vp.width; canvas.height = vp.height;
+      canvas.style.width = (vp.width / (window.devicePixelRatio || 1)) + 'px';
+      canvas.style.height = (vp.height / (window.devicePixelRatio || 1)) + 'px';
+      canvas.style.display = 'block';
+      canvas.style.margin = '0 auto';
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    } catch (e) { entry.rendered = false; }
+  }
+  _onScrollUpdate() {
+    if (!this._scrollContainer) return;
+    const scrollTop = ui.area.scrollTop;
+    const viewportH = ui.area.clientHeight;
+    let currentPage = 1;
+    for (const [pg, { wrap }] of this._scrollCanvases) {
+      const top = wrap.offsetTop;
+      if (top <= scrollTop + viewportH * 0.3) currentPage = pg;
+    }
+    if (currentPage !== this.page) {
+      this.page = currentPage;
+      updateProgress((this.page - 1) / Math.max(1, this.total - 1), `${this.page} / ${this.total}`);
+    }
+  }
+  async _scrollFit() {
+    const basePage = await this.pdf.getPage(1);
+    const base = basePage.getViewport({ scale: 1 });
+    const avail = ui.area.clientWidth - 48;
+    this.scale = avail / base.width;
+    // 重新渲染所有已渲染的页面
+    for (const [pg, entry] of this._scrollCanvases) {
+      if (entry.rendered) { entry.rendered = false; this._renderScrollPage(pg); }
+    }
+  }
+  _exitScrollMode() {
+    this._scrollMode = false;
+    this._scrollObserver?.disconnect();
+    this._scrollObserver = null;
+    if (this._scrollContainer) {
+      this._scrollContainer.removeEventListener('scroll', this._onScrollView);
+      this._scrollContainer.remove();
+      this._scrollContainer = null;
+    }
+    this._scrollCanvases.clear();
+    // 恢复单页 canvas
+    this.canvas = document.createElement('canvas');
+    this.canvas.id = 'pdf-canvas';
+    ui.area.appendChild(this.canvas);
   }
   async render() {
     if (this.rendering) { this.pending = this.page; return; }
@@ -240,11 +345,20 @@ class PDFReader {
   seek(f) { this.page = Math.max(1, Math.min(this.total, Math.round(f * (this.total - 1)) + 1)); this.render(); }
   seekByPage(page) { this.page = Math.max(1, Math.min(this.total, page)); this.render(); }
   getLocation() { return { page: this.page, progress: (this.page - 1) / Math.max(1, this.total - 1), label: `第${this.page}页` }; }
-  setMode(vertical) {
+  setMode(mode) {
+    // mode: 0=horizontal, 1=vertical, 2=scroll
     // 清理旧的 wheel 监听
     if (this._onWheel) { ui.area.removeEventListener('wheel', this._onWheel); this._onWheel = null; }
     if (this._wheelLock) { clearTimeout(this._wheelLock); this._wheelLock = null; }
-    if (vertical) {
+    // 卷轴模式切换
+    if (mode === 2 && !this._scrollMode) {
+      this._enterScrollMode();
+      return;
+    }
+    if (mode !== 2 && this._scrollMode) {
+      this._exitScrollMode();
+    }
+    if (mode === 1) {
       // 垂直模式：滚轮在页面边界时翻页
       this._onWheel = (e) => {
         if (this.rendering) return;
@@ -264,10 +378,13 @@ class PDFReader {
         }
       };
       ui.area.addEventListener('wheel', this._onWheel, { passive: false });
+    } else if (mode === 0 && this.canvas) {
+      // 水平模式: 重新渲染
+      this.render();
     }
   }
   save(frac) { API.saveProgress(this.book.id, { progress: frac, page: this.page, total: this.total }); }
-  destroy() { window.removeEventListener('resize', this._onResize); if (this._onWheel) ui.area.removeEventListener('wheel', this._onWheel); if (this._wheelLock) clearTimeout(this._wheelLock); try { this.pdf?.destroy(); } catch {} }
+  destroy() { window.removeEventListener('resize', this._onResize); if (this._onWheel) ui.area.removeEventListener('wheel', this._onWheel); if (this._wheelLock) clearTimeout(this._wheelLock); this._scrollObserver?.disconnect(); if (this._scrollContainer) this._scrollContainer.removeEventListener('scroll', this._onScrollView); try { this.pdf?.destroy(); } catch {} }
 }
 
 // =====================================================================
@@ -286,7 +403,7 @@ class EPUBReader {
     this.bookObj = ePub(API.fileUrl(this.book.id));
     await this.bookObj.ready;
     this.rendition = this.bookObj.renderTo(this.host, {
-      width: '100%', height: '100%', flow: scrollMode ? 'scrolled' : 'paginated', spread: 'none', allowScriptedContent: false,
+      width: '100%', height: '100%', flow: readerMode >= 1 ? 'scrolled' : 'paginated', spread: 'none', allowScriptedContent: false,
     });
     this.registerThemes();
     this.rendition.themes.select(lightTheme ? 'light' : 'dark');
@@ -350,10 +467,10 @@ class EPUBReader {
   seekByPage(page) { /* EPUB 用 CFI 定位，走 seek(progress) 路径 */ }
   setTheme(t) { this.rendition?.themes.select(t); }
   getLocation() { return { page: 0, progress: this.currentProgress, label: `${Math.round(this.currentProgress * 100)}%` }; }
-  setMode(vertical) {
+  setMode(mode) {
     if (!this.rendition) return;
-    // epub.js 原生支持 flow 切换
-    this.rendition.flow(vertical ? 'scrolled' : 'paginated');
+    // mode: 0=horizontal(paginated), 1/2=vertical/scroll(scrolled)
+    this.rendition.flow(mode >= 1 ? 'scrolled' : 'paginated');
   }
   save(frac) { API.saveProgress(this.book.id, { progress: frac, cfi: this.cfi }); }
   destroy() {
@@ -403,7 +520,7 @@ class TxtReader {
   seek(f) { const max = this.box.scrollHeight - this.box.clientHeight; this.box.scrollTop = f * max; }
   seekByPage(page) { /* TXT 无分页概念，忽略 */ }
   getLocation() { return { page: 0, progress: this._frac, label: `${Math.round(this._frac * 100)}%` }; }
-  setMode(vertical) { /* TXT 始终滚动；CSS 控制导航按钮显隐 */ }
+  setMode(mode) { /* TXT 始终滚动；CSS 控制导航按钮显隐 */ }
   setTheme() {}
   save(frac) { API.saveProgress(this.book.id, { progress: frac }); }
   destroy() { window.removeEventListener('resize', this._onResize); }
@@ -450,10 +567,10 @@ class CBZReader {
   seek(f) { this.idx = Math.max(0, Math.min(this.total - 1, Math.round(f * (this.total - 1)))); this.render(); }
   seekByPage(page) { this.idx = Math.max(0, Math.min(this.total - 1, page - 1)); this.render(); }
   getLocation() { return { page: this.idx + 1, progress: this.total > 1 ? this.idx / (this.total - 1) : 0, label: `${this.idx + 1}/${this.total}` }; }
-  setMode(vertical) {
+  setMode(mode) {
     if (this._onWheel) { ui.area.removeEventListener('wheel', this._onWheel); this._onWheel = null; }
     if (this._wheelLock) { clearTimeout(this._wheelLock); this._wheelLock = null; }
-    if (vertical) {
+    if (mode >= 1) {
       this._onWheel = (e) => {
         if (Math.abs(e.deltaY) < 10) return;
         if (this._wheelLock) return;

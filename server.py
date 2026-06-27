@@ -54,6 +54,19 @@ LIBRARY_FILE = os.path.join(DATA_DIR, "library.json")
 AI_CONFIG_FILE = os.path.join(DATA_DIR, "ai_config.json")
 MEMORY_FILE = os.path.join(DATA_DIR, "agent_memory.json")
 
+# ---- Agent 沙箱: 所有文件操作限制在这些目录内 ----
+SANDBOX_DIRS = [os.path.abspath(BOOKS_DIR), os.path.abspath(DATA_DIR)]
+
+def validate_sandbox_path(path):
+    """验证路径在沙箱目录内, 防止目录遍历攻击"""
+    if not path:
+        return False
+    abs_path = os.path.abspath(path)
+    for sandbox_dir in SANDBOX_DIRS:
+        if abs_path.startswith(sandbox_dir + os.sep) or abs_path == sandbox_dir:
+            return True
+    return False
+
 SUPPORTED_EXT = {
     ".pdf": "pdf", ".epub": "epub", ".txt": "txt",
     ".mobi": "mobi", ".azw3": "azw3", ".fb2": "fb2",
@@ -127,14 +140,143 @@ def scan_books():
     return result
 
 
+# ---- 联网搜索 + 下载书籍 ----
+def _tool_web_search(args, context):
+    """联网搜索: 使用 Bing 搜索互联网"""
+    query = args.get("query", "").strip()
+    if not query:
+        return make_tool_result(False, error="搜索关键词不能为空", retryable=False)
+    try:
+        import re as _re
+        url = "https://www.bing.com/search?q=" + urllib.parse.quote(query) + "&count=10"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        # 解析 Bing 搜索结果
+        results = []
+        # Bing 结果在 <li class="b_algo"> 块中
+        items = _re.findall(r'<li class="b_algo"[^>]*>(.*?)</li>', html, _re.DOTALL)
+        for item in items:
+            # 提取标题和 URL (在 <h2><a href="URL">TITLE</a></h2> 中)
+            link_match = _re.search(r'<h2[^>]*><a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a></h2>', item, _re.DOTALL)
+            if not link_match:
+                continue
+            raw_url = link_match.group(1)
+            title_html = link_match.group(2)
+            title = _re.sub(r'<[^>]+>', '', title_html).strip()
+            # 提取摘要 (在 <p class="b_lineclamp...">SNIPPET</p> 中)
+            snip_match = _re.search(r'<p class="b_lineclamp[^"]*"[^>]*>(.*?)</p>', item, _re.DOTALL)
+            snippet = ""
+            if snip_match:
+                snippet = _re.sub(r'<[^>]+>', '', snip_match.group(1)).strip()[:200]
+            if title and raw_url:
+                results.append({"title": title, "url": raw_url, "snippet": snippet})
+        if not results:
+            return make_tool_result(True, data={"results": [], "message": "未找到相关结果, 请尝试其他关键词"})
+        return make_tool_result(True, data={"results": results[:10], "count": len(results[:10]), "query": query})
+    except Exception as e:
+        return make_tool_result(False, error="搜索失败: {}".format(str(e)), retryable=True)
+
+
+def _tool_download_book(args, context):
+    """从 URL 下载书籍并自动导入书架"""
+    url = args.get("url", "").strip()
+    title = args.get("title", "").strip()
+    if not url:
+        return make_tool_result(False, error="下载 URL 不能为空", retryable=False)
+    if not url.startswith(("http://", "https://")):
+        return make_tool_result(False, error="URL 必须以 http:// 或 https:// 开头", retryable=False)
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            # 从 URL 或 Content-Disposition 提取文件名
+            cd = resp.headers.get("Content-Disposition", "")
+            fname = ""
+            if "filename=" in cd:
+                import re as _re
+                m = _re.search(r'filename="?([^";\n]+)"?', cd)
+                if m:
+                    fname = m.group(1)
+            if not fname:
+                # 从 URL 路径提取
+                path_part = urllib.parse.urlparse(url).path
+                fname = os.path.basename(path_part) or "download"
+            # 确保有扩展名
+            ext = os.path.splitext(fname)[1].lower()
+            if not ext or ext not in SUPPORTED_EXT:
+                # 尝试从 Content-Type 推断
+                ct = resp.headers.get("Content-Type", "").lower()
+                ct_map = {"application/pdf": ".pdf", "application/epub+zip": ".epub", "text/plain": ".txt"}
+                for k, v in ct_map.items():
+                    if k in ct:
+                        ext = v
+                        break
+                if not ext:
+                    return make_tool_result(False, error="无法确定文件格式, 请指定正确的下载链接 (支持 PDF/EPUB/TXT/MOBI/AZW3)", retryable=False)
+                fname = fname + ext if not fname.endswith(ext) else fname
+            # 沙箱验证: 确保文件名安全
+            fname = os.path.basename(fname)
+            dest = os.path.join(BOOKS_DIR, fname)
+            dest = os.path.abspath(dest)
+            if not validate_sandbox_path(dest):
+                return make_tool_result(False, error="文件名不安全", retryable=False)
+            # 如果文件已存在, 添加序号
+            if os.path.exists(dest):
+                base, ext2 = os.path.splitext(fname)
+                for i in range(2, 100):
+                    candidate = os.path.join(BOOKS_DIR, "{}_{}{}".format(base, i, ext2))
+                    if not os.path.exists(candidate):
+                        dest = candidate
+                        fname = os.path.basename(candidate)
+                        break
+            # 下载文件
+            data = resp.read()
+            if len(data) < 100:
+                return make_tool_result(False, error="下载内容过小, 可能是无效链接", retryable=False)
+            with open(dest, "wb") as f:
+                f.write(data)
+            # 自动导入到书架
+            bid = urllib.parse.quote(fname)
+            lib = load_library()
+            meta = lib.setdefault("books", {}).setdefault(bid, {})
+            meta["title"] = title or os.path.splitext(fname)[0]
+            meta["addedAt"] = int(time.time())
+            save_library(lib)
+            return make_tool_result(True, data={
+                "bookId": bid,
+                "fileName": fname,
+                "title": meta["title"],
+                "size": len(data),
+                "message": "已下载《{}》并导入书架 ({})".format(meta["title"], _format_size(len(data))),
+            })
+    except urllib.error.HTTPError as e:
+        return make_tool_result(False, error="下载失败 (HTTP {}): {}".format(e.code, e.reason), retryable=True)
+    except Exception as e:
+        return make_tool_result(False, error="下载失败: {}".format(str(e)), retryable=True)
+
+
+def _format_size(n):
+    if n < 1024:
+        return "{} B".format(n)
+    elif n < 1024 * 1024:
+        return "{:.1f} KB".format(n / 1024)
+    else:
+        return "{:.1f} MB".format(n / (1024 * 1024))
+
+
 def book_path(book_id):
+    """安全获取书籍路径 (沙箱验证: 防止目录遍历)"""
     name = urllib.parse.unquote(book_id)
     name = os.path.basename(name)
     if not name:
         return None
     full = os.path.join(BOOKS_DIR, name)
     full = os.path.abspath(full)
-    if not full.startswith(os.path.abspath(BOOKS_DIR) + os.sep):
+    if not validate_sandbox_path(full):
         return None
     if not os.path.isfile(full):
         return None
@@ -797,6 +939,11 @@ class ContextBuilder:
 # ---- 系统提示 ----
 AI_SYSTEM_PROMPT = """你是「阅微」, 一个本地电子书书架的智能 AI 助手, 基于 Agent 架构运行。你可以通过调用工具来完成用户的请求。
 
+## 安全沙箱
+- 你运行在沙箱环境中, 所有文件操作被限制在书籍目录和数据目录内。
+- 你无法访问系统其他文件, 无法执行系统命令, 无法访问网络以外的资源。
+- 这确保了你的操作不会影响用户的系统安全。
+
 ## 你的能力 (可用工具)
 1. list_books - 列出书架上的所有书籍 (含书名/作者/格式/分类/进度)
 2. find_books - 按关键词搜索书籍
@@ -813,11 +960,14 @@ AI_SYSTEM_PROMPT = """你是「阅微」, 一个本地电子书书架的智能 A
 13. remember_preference - 将用户偏好或重要事实保存到长期记忆
 14. recall_memory - 从长期记忆中检索与查询相关的记忆
 15. get_reading_context - 获取用户当前正在阅读的书籍上下文
+16. web_search - 联网搜索互联网, 获取搜索结果(标题/URL/摘要). 用于查找书籍下载链接或获取最新信息
+17. download_book - 从 URL 下载书籍文件并自动导入书架. 支持 PDF/EPUB/TXT/MOBI/AZW3
 
 ## 行为规则
 - 用简洁友好的中文回答。
 - 当用户要求总结一本书时, 先调用 get_book_content 获取内容, 再进行总结。
 - **当用户要求分类多本书时, 先调用 list_books 获取书单, 然后直接用 batch_categorize 一次性完成全部分类, 不要逐本调用 categorize_book。**
+- **当用户要求下载书籍时: 先用 web_search 搜索书籍下载链接, 找到直链后用 download_book 下载并自动导入书架。**
 - 如果用户提到偏好或重要信息, 主动调用 remember_preference 保存到长期记忆。
 - 不要用相同参数重复调用同一个工具, 请直接使用之前返回的结果。
 - 工具调用失败时不要无限重试, 基于已有信息回答即可。
@@ -1372,6 +1522,31 @@ TOOL_DEFS = [
         "description": "获取用户当前正在阅读的书籍上下文 (当前书、页码、进度)",
         "parameters": {"type": "object", "properties": {}},
         "handler": _tool_get_reading_context,
+    },
+    {
+        "name": "web_search",
+        "description": "联网搜索互联网, 获取搜索结果(标题、URL、摘要). 用于查找书籍下载链接、获取最新信息等",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+            },
+            "required": ["query"],
+        },
+        "handler": _tool_web_search,
+    },
+    {
+        "name": "download_book",
+        "description": "从指定 URL 下载书籍文件并自动导入书架. 支持 PDF/EPUB/TXT/MOBI/AZW3 格式. 下载前可先用 web_search 搜索下载链接",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "书籍文件的下载 URL (http/https)"},
+                "title": {"type": "string", "description": "书籍标题 (可选, 用于书架显示)"},
+            },
+            "required": ["url"],
+        },
+        "handler": _tool_download_book,
     },
 ]
 
@@ -2109,7 +2284,7 @@ class Handler(BaseHTTPRequestHandler):
                 fn_name = tc.get("function", {}).get("name", "")
                 print("[Agent] Step {} calling tool: {}".format(controller.step, fn_name), file=_sys.stderr, flush=True)
                 # 发送工具调用状态
-                tool_label = {"list_books": "查看书架", "set_book_category": "设置分类", "list_categories": "查看分类", "search_books": "搜索书籍", "get_book_info": "获取书籍信息"}.get(fn_name, fn_name)
+                tool_label = {"list_books": "查看书架", "set_book_category": "设置分类", "list_categories": "查看分类", "search_books": "搜索书籍", "get_book_info": "获取书籍信息", "batch_categorize": "批量分类", "web_search": "联网搜索", "download_book": "下载书籍"}.get(fn_name, fn_name)
                 self._sse_write({"type": "tool", "tool": fn_name, "label": tool_label})
                 _tt0 = time.time()
                 try:

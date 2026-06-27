@@ -539,6 +539,31 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 .reader-stage[data-mode="vertical"] #pdf-canvas {
   margin: 0 auto;
 }
+
+/* ============================ 卷轴模式 ============================ */
+.reader-stage[data-mode="scroll"] .page-nav { display: none; }
+.reader-stage[data-mode="scroll"] .reader-area {
+  align-items: center;
+  justify-content: center;
+}
+.pdf-scroll-container {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 16px 0;
+}
+.pdf-scroll-page {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+.pdf-scroll-page canvas {
+  display: block;
+  box-shadow: 0 4px 16px -6px rgba(0,0,0,0.5);
+  background: #fff;
+}
 /* CBZ 垂直模式：图片堆叠 */
 .cbz-scroll {
   width: 100%; height: 100%;
