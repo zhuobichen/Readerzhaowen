@@ -277,7 +277,8 @@ class EPUBReader {
   static async create(book, resume) { return new EPUBReader(book, resume); }
   constructor(book, resume) { this.book = book; this.resume = resume; this.cfi = resume?.cfi || null; this.currentProgress = 0; }
   async start() {
-    showTool({ zoom: false, fit: false, theme: true, mode: true });
+    showTool({ zoom: true, fit: false, theme: true, mode: true });
+    this._fontScale = 1;
     this.host = document.createElement('div');
     this.host.id = 'epub-viewer';
     this.host.style.cssText = 'position:absolute;inset:0;';
@@ -318,6 +319,14 @@ class EPUBReader {
     this.currentProgress = frac;
     const pct = Math.round(frac * 100);
     updateProgress(frac, `${pct}% · 第 ${Math.max(1, start.location || 1)} 处`);
+  }
+  zoom(dir) {
+    if (!this.rendition) return;
+    this._fontScale *= dir > 0 ? 1.1 : 1 / 1.1;
+    this._fontScale = Math.max(0.6, Math.min(2.4, this._fontScale));
+    // epub.js themes.fontSize 接受 CSS 值
+    this.rendition.themes.fontSize((100 * this._fontScale) + '%');
+    ui.zoomLvl.textContent = Math.round(this._fontScale * 100) + '%';
   }
   next() { this._epubAnim('forward'); this.rendition.next(); }
   prev() { this._epubAnim('back'); this.rendition.prev(); }
