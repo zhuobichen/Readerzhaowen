@@ -1365,7 +1365,7 @@ def extract_actions(text):
 
 # ---- LLM API 调用 ----
 def call_llm_api(config, messages, tools=None):
-    """调用 OpenAI 兼容 API (非流式), 用于工具调用轮次"""
+    """调用 OpenAI 兼容 API (非流式), 用于工具调用轮次。带重试。"""
     endpoint = config.get("endpoint", "").rstrip("/")
     if not endpoint:
         endpoint = "https://api.openai.com/v1"
@@ -1382,14 +1382,36 @@ def call_llm_api(config, messages, tools=None):
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", "Bearer {}".format(api_key))
 
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
-        return {"error": "API错误 {}: {}".format(e.code, err_body[:500])}
-    except Exception as e:
-        return {"error": str(e)}
+    max_retries = 2
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            # 429/5xx 可重试
+            if e.code in (429, 500, 502, 503) and attempt < max_retries:
+                import time as _time
+                _time.sleep(2 * (attempt + 1))
+                # 重建 request (body 已被读)
+                req = urllib.request.Request(url, data=data, method="POST")
+                req.add_header("Content-Type", "application/json")
+                req.add_header("Authorization", "Bearer {}".format(api_key))
+                last_err = "API错误 {}: {}".format(e.code, err_body[:300])
+                continue
+            return {"error": "API错误 {}: {}".format(e.code, err_body[:500])}
+        except Exception as e:
+            last_err = str(e)
+            if attempt < max_retries:
+                import time as _time
+                _time.sleep(2 * (attempt + 1))
+                req = urllib.request.Request(url, data=data, method="POST")
+                req.add_header("Content-Type", "application/json")
+                req.add_header("Authorization", "Bearer {}".format(api_key))
+                continue
+            return {"error": str(e)}
+    return {"error": last_err or "未知错误"}
 
 
 def call_llm_stream(config, messages, tools=None):
@@ -1410,7 +1432,7 @@ def call_llm_stream(config, messages, tools=None):
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", "Bearer {}".format(api_key))
 
-    resp = urllib.request.urlopen(req, timeout=120)
+    resp = urllib.request.urlopen(req, timeout=180)
     buf = b""
     for line in resp:
         buf += line

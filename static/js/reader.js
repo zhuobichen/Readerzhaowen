@@ -45,14 +45,15 @@ function applyMode() {
 }
 
 function updateModeIcon() {
-  // 水平模式: 左右箭头; 垂直模式: 上下箭头
   const svg = ui.mode.querySelector('svg');
   if (scrollMode) {
-    svg.innerHTML = '<path d="M12 3v18M3 12h18"/>';
+    // 上下滚动: 双向下箭头(表示滚动方向)
+    svg.innerHTML = '<path d="M7 13l5 5 5-5"/><path d="M7 6l5 5 5-5"/>';
     svg.setAttribute('stroke-width', '2');
     ui.mode.title = '当前: 上下滚动 | 点击切换为左右翻页';
   } else {
-    svg.innerHTML = '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>';
+    // 左右翻页: 左右双向箭头(表示翻页方向)
+    svg.innerHTML = '<path d="M9 7l-5 5 5 5"/><path d="M15 7l5 5-5 5"/>';
     ui.mode.title = '当前: 左右翻页 | 点击切换为上下滚动';
   }
 }
