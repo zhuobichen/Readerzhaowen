@@ -79,7 +79,39 @@ async function handleUpload(files) {
   }
 }
 
+// ---- 主题切换 ----
+function initTheme() {
+  const saved = localStorage.getItem('reader-theme') || 'dark';
+  applyTheme(saved);
+  const btn = document.getElementById('btn-theme-toggle');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      const current = document.body.dataset.theme === 'light' ? 'light' : 'dark';
+      const next = current === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      localStorage.setItem('reader-theme', next);
+    });
+  }
+}
+
+function applyTheme(theme) {
+  if (theme === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    document.body.dataset.theme = 'light';
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+    document.body.dataset.theme = 'dark';
+  }
+  const darkIcon = document.getElementById('theme-icon-dark');
+  const lightIcon = document.getElementById('theme-icon-light');
+  if (darkIcon && lightIcon) {
+    darkIcon.style.display = theme === 'dark' ? '' : 'none';
+    lightIcon.style.display = theme === 'light' ? '' : 'none';
+  }
+}
+
 function bind() {
+  initTheme();
   Reader.init();
   Notes.init();
   AI.init();
@@ -98,11 +130,15 @@ function bind() {
     });
   }
 
-  // 拖拽导入：全屏拖入提示
+  // 拖拽导入：仅对文件类型触发，书籍拖拽(text/plain)不显示
   let dragCounter = 0;
   let dropOverlay = null;
+  function isFileDrag(e) {
+    // Files 类型拖拽才显示导入提示
+    return e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files');
+  }
   window.addEventListener('dragenter', (e) => {
-    if (!e.dataTransfer?.types?.includes('Files')) return;
+    if (!isFileDrag(e)) return;
     e.preventDefault();
     dragCounter++;
     if (!dropOverlay) {
@@ -112,7 +148,7 @@ function bind() {
       document.body.appendChild(dropOverlay);
     }
   });
-  window.addEventListener('dragover', (e) => { if (e.dataTransfer?.types?.includes('Files')) e.preventDefault(); });
+  window.addEventListener('dragover', (e) => { if (isFileDrag(e)) e.preventDefault(); });
   window.addEventListener('dragleave', () => {
     dragCounter--;
     if (dragCounter <= 0) {
@@ -122,6 +158,7 @@ function bind() {
     }
   });
   window.addEventListener('drop', (e) => {
+    if (!isFileDrag(e)) return;
     e.preventDefault();
     dragCounter = 0;
     dropOverlay?.remove();

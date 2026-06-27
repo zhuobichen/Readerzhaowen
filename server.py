@@ -15,11 +15,15 @@
   GET  /api/books/<id>/notes   -> 读取笔记列表
   POST /api/books/<id>/notes   -> 增/改/删笔记
   POST /api/books/<id>/category-> 设置书籍分类 {category}
-  DELETE /api/books/<id>       -> 删除书籍文件
+  DELETE /api/books/<id>       -> 删除书籍 (软删除, 移入回收站)
   POST /api/books/upload       -> 上传书籍 (multipart/form-data)
   GET  /api/categories         -> 获取所有分类及书籍数
   POST /api/categories         -> 新建/重命名分类
   DELETE /api/categories/<name>-> 删除分类
+  GET  /api/trash              -> 回收站列表 (自动清理 >30天 项)
+  POST /api/trash/restore      -> 恢复书籍 {book_id}
+  POST /api/trash/empty        -> 清空回收站过期项 (>30天)
+  DELETE /api/trash/<book_id>  -> 永久删除回收站书籍 (删文件)
   GET  /api/ai/config          -> 获取AI配置 (key脱敏)
   POST /api/ai/config          -> 保存AI配置
   POST /api/ai/chat            -> AI Agent 对话 (流式SSE)
@@ -65,12 +69,19 @@ for d in (BOOKS_DIR, STATIC_DIR, DATA_DIR):
 # --------------------------------------------------------------------------- #
 def load_library():
     if not os.path.exists(LIBRARY_FILE):
-        return {"books": {}}
+        return {"books": {}, "trash": {}}
     try:
         with open(LIBRARY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except Exception:
-        return {"books": {}}
+        return {"books": {}, "trash": {}}
+    # 确保必要字段存在 (兼容旧版 library.json)
+    if "books" not in data:
+        data["books"] = {}
+    # trash: {book_id: {"title": str, "deletedAt": timestamp, "originalCategory": str, "path": str}}
+    if "trash" not in data:
+        data["trash"] = {}
+    return data
 
 
 def save_library(data):
@@ -140,6 +151,72 @@ def get_all_categories():
         if c and c not in cats:
             cats.append(c)
     return sorted(cats)
+
+
+# --------------------------------------------------------------------------- #
+#  回收站 (trash)
+# --------------------------------------------------------------------------- #
+TRASH_RETENTION_SECONDS = 30 * 86400  # 回收站保留 30 天
+
+
+def clean_expired_trash():
+    """清理超过 30 天的回收站项目 (永久删除文件并移出 trash)"""
+    lib = load_library()
+    trash = lib.get("trash", {})
+    if not trash:
+        return []
+    now = int(time.time())
+    expired = []
+    for bid, info in list(trash.items()):
+        if now - info.get("deletedAt", 0) > TRASH_RETENTION_SECONDS:
+            # 永久删除文件
+            try:
+                p = info.get("path", "")
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+            trash.pop(bid, None)
+            expired.append(bid)
+    if expired:
+        save_library(lib)
+    return expired
+
+
+def restore_from_trash(book_id):
+    """从回收站恢复一本书到书架, 返回 (info, error)"""
+    lib = load_library()
+    trash = lib.get("trash", {})
+    if book_id not in trash:
+        return None, "not in trash"
+    info = trash.pop(book_id)
+    # 恢复到 books
+    books = lib.setdefault("books", {})
+    books[book_id] = {
+        "progress": 0,
+        "category": info.get("originalCategory", ""),
+    }
+    # 保留原有元数据 (标题/作者/封面等) 若存在则不覆盖
+    save_library(lib)
+    return info, None
+
+
+def permanently_delete_from_trash(book_id):
+    """永久删除回收站中的一本书 (删除文件并移出 trash), 返回 (info, error)"""
+    lib = load_library()
+    trash = lib.get("trash", {})
+    if book_id not in trash:
+        return None, "not in trash"
+    info = trash.pop(book_id)
+    # 永久删除文件
+    try:
+        p = info.get("path", "")
+        if p and os.path.exists(p):
+            os.remove(p)
+    except Exception:
+        pass
+    save_library(lib)
+    return info, None
 
 
 def extract_book_text(path, fmt, max_chars=8000):
@@ -756,10 +833,15 @@ AI_SYSTEM_PROMPT = """你是「阅微」, 一个本地电子书书架的智能 A
 # ---- 工具执行函数 (每个返回 ToolResult) ----
 def _tool_list_books(args, context):
     books = scan_books()
-    lib = load_library().get("books", {})
+    lib = load_library()
+    trash = lib.get("trash", {})
+    meta_lib = lib.get("books", {})
     data = []
     for b in books:
-        meta = lib.get(b["id"], {})
+        # 排除回收站中的书籍
+        if b["id"] in trash:
+            continue
+        meta = meta_lib.get(b["id"], {})
         title = meta.get("title") or os.path.splitext(b["name"])[0]
         data.append({
             "id": b["id"],
@@ -775,10 +857,15 @@ def _tool_list_books(args, context):
 def _tool_find_books(args, context):
     q = (args.get("query", "") or "").lower()
     books = scan_books()
-    lib = load_library().get("books", {})
+    lib = load_library()
+    trash = lib.get("trash", {})
+    meta_lib = lib.get("books", {})
     data = []
     for b in books:
-        meta = lib.get(b["id"], {})
+        # 排除回收站中的书籍
+        if b["id"] in trash:
+            continue
+        meta = meta_lib.get(b["id"], {})
         title = meta.get("title") or os.path.splitext(b["name"])[0]
         author = meta.get("author", "")
         if q in title.lower() or q in author.lower() or q in b["id"].lower():
@@ -911,14 +998,85 @@ def _tool_delete_book(args, context):
     if not full:
         return make_tool_result(False, error="找不到这本书: {}".format(bid), retryable=False)
     lib = load_library()
-    title = lib.get("books", {}).get(bid, {}).get("title", bid)
-    try:
-        os.remove(full)
-    except Exception as e:
-        return make_tool_result(False, error="删除失败: {}".format(e), retryable=True)
+    meta = lib.get("books", {}).get(bid, {})
+    title = meta.get("title", bid)
+    # 软删除: 移入回收站, 不删除文件
+    trash = lib.setdefault("trash", {})
+    trash[bid] = {
+        "title": title,
+        "deletedAt": int(time.time()),
+        "originalCategory": meta.get("category", ""),
+        "path": full,
+    }
     lib.get("books", {}).pop(bid, None)
     save_library(lib)
-    return make_tool_result(True, data={"bookId": bid, "title": title, "message": "已删除《{}》".format(title)})
+    return make_tool_result(True, data={
+        "bookId": bid,
+        "title": title,
+        "message": "已将《{}》移入回收站 (30天后永久删除, 可用 restore_book 恢复)".format(title),
+    })
+
+
+def _tool_list_trash(args, context):
+    """列出回收站中的所有书籍"""
+    # 访问回收站时自动清理过期项
+    expired = clean_expired_trash()
+    lib = load_library()
+    trash = lib.get("trash", {})
+    now = int(time.time())
+    data = []
+    for bid, info in trash.items():
+        deleted_at = info.get("deletedAt", 0)
+        age = now - deleted_at
+        remain = max(0, TRASH_RETENTION_SECONDS - age)
+        # 剩余天数 (向上取整)
+        remain_days = (remain + 86399) // 86400
+        data.append({
+            "bookId": bid,
+            "title": info.get("title", bid),
+            "deletedAt": deleted_at,
+            "originalCategory": info.get("originalCategory", "未分类"),
+            "remainDays": remain_days,
+        })
+    data.sort(key=lambda x: x.get("deletedAt", 0), reverse=True)
+    return make_tool_result(True, data={
+        "trash": data,
+        "count": len(data),
+        "expiredRemoved": len(expired),
+        "message": "回收站共有 {} 本书".format(len(data)),
+    })
+
+
+def _tool_restore_book(args, context):
+    """从回收站恢复一本书到书架"""
+    bid = args.get("book_id", "")
+    if not bid:
+        return make_tool_result(False, error="book_id 不能为空", retryable=False)
+    info, err = restore_from_trash(bid)
+    if err:
+        return make_tool_result(False, error="《{}》不在回收站中".format(bid), retryable=False)
+    title = info.get("title", bid)
+    return make_tool_result(True, data={
+        "bookId": bid,
+        "title": title,
+        "message": "已从回收站恢复《{}》到书架".format(title),
+    })
+
+
+def _tool_delete_book_permanent(args, context):
+    """永久删除回收站中的一本书 (删除文件, 不可恢复)"""
+    bid = args.get("book_id", "")
+    if not bid:
+        return make_tool_result(False, error="book_id 不能为空", retryable=False)
+    info, err = permanently_delete_from_trash(bid)
+    if err:
+        return make_tool_result(False, error="《{}》不在回收站中".format(bid), retryable=False)
+    title = info.get("title", bid)
+    return make_tool_result(True, data={
+        "bookId": bid,
+        "title": title,
+        "message": "已永久删除《{}》, 文件已被移除".format(title),
+    })
 
 
 def _tool_open_book(args, context):
@@ -1078,13 +1236,39 @@ TOOL_DEFS = [
     },
     {
         "name": "delete_book",
-        "description": "从书架删除一本书 (删除文件, 不可恢复)",
+        "description": "从书架移除一本书 (移入回收站, 30天后永久删除, 可用 restore_book 恢复)",
         "parameters": {
             "type": "object",
             "properties": {"book_id": {"type": "string", "description": "书籍ID"}},
             "required": ["book_id"],
         },
         "handler": _tool_delete_book,
+    },
+    {
+        "name": "list_trash",
+        "description": "列出回收站中的所有书籍 (含删除时间、原分类、剩余保留天数)",
+        "parameters": {"type": "object", "properties": {}},
+        "handler": _tool_list_trash,
+    },
+    {
+        "name": "restore_book",
+        "description": "从回收站恢复一本书到书架 (放回原分类)",
+        "parameters": {
+            "type": "object",
+            "properties": {"book_id": {"type": "string", "description": "回收站中的书籍ID"}},
+            "required": ["book_id"],
+        },
+        "handler": _tool_restore_book,
+    },
+    {
+        "name": "delete_book_permanent",
+        "description": "永久删除回收站中的一本书 (删除文件, 不可恢复)",
+        "parameters": {
+            "type": "object",
+            "properties": {"book_id": {"type": "string", "description": "回收站中的书籍ID"}},
+            "required": ["book_id"],
+        },
+        "handler": _tool_delete_book_permanent,
     },
     {
         "name": "open_book",
@@ -1334,6 +1518,14 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["api", "ai", "chat"]:
             return self._api_ai_chat()
 
+        # /api/trash/restore  -> 从回收站恢复书籍
+        if parts == ["api", "trash", "restore"]:
+            return self._api_trash_restore()
+
+        # /api/trash/empty  -> 清空回收站过期项 (>30天)
+        if parts == ["api", "trash", "empty"]:
+            return self._api_trash_empty()
+
         if len(parts) == 2 and parts[0] == "api" and parts[1] == "library":
             return self._api_save_library()
 
@@ -1346,6 +1538,10 @@ class Handler(BaseHTTPRequestHandler):
         # /api/books/<id>
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "books":
             return self._api_delete_book(parts[2])
+
+        # /api/trash/<book_id>  -> 永久删除回收站中的书籍
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "trash":
+            return self._api_trash_delete_permanent(urllib.parse.unquote(parts[2]))
 
         # /api/categories/<name>
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "categories":
@@ -1412,10 +1608,14 @@ class Handler(BaseHTTPRequestHandler):
     def _api_get(self, parts, parsed):
         # /api/books
         if parts == ["api", "books"]:
+            lib = load_library()
+            trash = lib.get("trash", {})
             books = scan_books()
-            lib = load_library().get("books", {})
+            meta_lib = lib.get("books", {})
+            # 过滤掉回收站中的书籍 (文件仍在磁盘, 但不应出现在书架)
+            books = [b for b in books if b["id"] not in trash]
             for b in books:
-                meta = lib.get(b["id"], {})
+                meta = meta_lib.get(b["id"], {})
                 b["title"] = meta.get("title") or os.path.splitext(b["name"])[0]
                 b["author"] = meta.get("author", "")
                 b["progress"] = meta.get("progress", 0)
@@ -1454,6 +1654,10 @@ class Handler(BaseHTTPRequestHandler):
         # /api/ai/memory
         if parts == ["api", "ai", "memory"]:
             return self._api_memory_get()
+
+        # /api/trash  -> 回收站列表
+        if parts == ["api", "trash"]:
+            return self._api_trash_list()
 
         # /api/books/<id>/file
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "books" and parts[3] == "file":
@@ -1544,20 +1748,95 @@ class Handler(BaseHTTPRequestHandler):
         save_library(lib)
         self._json(200, {"ok": True})
 
-    # ---- 书籍删除 ----
+    # ---- 书籍删除 (软删除: 移入回收站, 不删除文件) ----
     def _api_delete_book(self, book_id):
         full = book_path(book_id)
         if not full:
             return self._json(404, {"error": "book not found"})
         lib = load_library()
-        title = lib.get("books", {}).get(book_id, {}).get("title", book_id)
-        try:
-            os.remove(full)
-        except Exception as e:
-            return self._json(500, {"error": str(e)})
+        meta = lib.get("books", {}).get(book_id, {})
+        title = meta.get("title", book_id)
+        # 移入回收站, 不删除文件
+        trash = lib.setdefault("trash", {})
+        trash[book_id] = {
+            "title": title,
+            "deletedAt": int(time.time()),
+            "originalCategory": meta.get("category", ""),
+            "path": full,
+        }
         lib.get("books", {}).pop(book_id, None)
         save_library(lib)
-        self._json(200, {"ok": True, "title": title})
+        self._json(200, {"ok": True, "title": title, "message": "已移入回收站"})
+
+    # ---- 回收站 API ----
+    def _api_trash_list(self):
+        # 访问回收站时自动清理过期项
+        expired = clean_expired_trash()
+        lib = load_library()
+        trash = lib.get("trash", {})
+        now = int(time.time())
+        items = []
+        for bid, info in trash.items():
+            deleted_at = info.get("deletedAt", 0)
+            age = now - deleted_at
+            # 剩余保留时间 (秒), 不少于 0
+            remain = max(0, TRASH_RETENTION_SECONDS - age)
+            items.append({
+                "bookId": bid,
+                "title": info.get("title", bid),
+                "deletedAt": deleted_at,
+                "originalCategory": info.get("originalCategory", ""),
+                "path": info.get("path", ""),
+                "ageSeconds": age,
+                "remainSeconds": remain,
+            })
+        # 按删除时间倒序 (最新删除在前)
+        items.sort(key=lambda x: x.get("deletedAt", 0), reverse=True)
+        return self._json(200, {
+            "trash": items,
+            "count": len(items),
+            "expiredRemoved": len(expired),
+        })
+
+    def _api_trash_restore(self):
+        try:
+            payload = json.loads(self._read_body().decode("utf-8"))
+        except Exception:
+            return self._json(400, {"error": "bad json"})
+        book_id = payload.get("book_id", "")
+        if not book_id:
+            return self._json(400, {"error": "book_id required"})
+        info, err = restore_from_trash(book_id)
+        if err:
+            return self._json(404, {"error": "该书不在回收站中"})
+        return self._json(200, {
+            "ok": True,
+            "bookId": book_id,
+            "title": info.get("title", book_id),
+            "message": "已从回收站恢复《{}》".format(info.get("title", book_id)),
+        })
+
+    def _api_trash_empty(self):
+        """清空回收站中所有过期项 (>30天), 并返回被清理的数量"""
+        expired = clean_expired_trash()
+        return self._json(200, {
+            "ok": True,
+            "expiredRemoved": len(expired),
+            "removed": expired,
+            "message": "已清理 {} 本过期书籍".format(len(expired)),
+        })
+
+    def _api_trash_delete_permanent(self, book_id):
+        """永久删除回收站中的一本书 (删除文件 + 移出 trash)"""
+        info, err = permanently_delete_from_trash(book_id)
+        if err:
+            return self._json(404, {"error": "该书不在回收站中"})
+        return self._json(200, {
+            "ok": True,
+            "bookId": book_id,
+            "title": info.get("title", book_id),
+            "message": "已永久删除《{}》".format(info.get("title", book_id)),
+        })
 
     # ---- 书籍上传 ----
     def _api_upload_book(self):

@@ -244,6 +244,42 @@ function filtered() {
   return list;
 }
 
+/** 显示/隐藏垃圾桶 */
+function showTrashBin(show) {
+  const bin = document.getElementById('trash-bin');
+  if (!bin) return;
+  if (show) {
+    bin.hidden = false;
+    bin.classList.add('show');
+    // 绑定 drop（仅绑一次）
+    if (!bin._bound) {
+      bin._bound = true;
+      bin.addEventListener('dragover', (e) => { e.preventDefault(); bin.classList.add('hover'); });
+      bin.addEventListener('dragleave', () => { bin.classList.remove('hover'); });
+      bin.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        bin.classList.remove('hover');
+        const bookId = e.dataTransfer.getData('text/plain');
+        if (!bookId) return;
+        closeMenus();
+        const book = allBooks.find(b => b.id === bookId);
+        const title = book ? (book.title || book.name) : bookId;
+        if (!confirm(`确定将《${title}》移入回收站？\n30天内可恢复，超过30天将永久删除。`)) return;
+        try {
+          await API.deleteBook(bookId);
+          load();
+          refreshCategories();
+        } catch (err) {
+          alert(err.message || '移入回收站失败');
+        }
+      });
+    }
+  } else {
+    bin.classList.remove('show');
+    setTimeout(() => { if (!bin.classList.contains('show')) bin.hidden = true; }, 200);
+  }
+}
+
 function render() {
   const list = filtered();
   el.empty.hidden = list.length > 0;
@@ -283,8 +319,12 @@ function render() {
       e.dataTransfer.setData('text/plain', b.id);
       e.dataTransfer.effectAllowed = 'move';
       card.classList.add('dragging');
+      showTrashBin(true);
     });
-    card.addEventListener('dragend', () => { card.classList.remove('dragging'); });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      showTrashBin(false);
+    });
     // 分类标签点击 -> 弹出分类选择
     const catTag = card.querySelector('.book-cat-tag');
     if (catTag) catTag.addEventListener('click', (e) => {
