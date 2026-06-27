@@ -758,6 +758,12 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 }
 .cat-item:hover .cat-menu-btn { display: flex; }
 .cat-menu-btn:hover { color: var(--accent); }
+.cat-item.drag-over {
+  background: var(--accent-soft) !important;
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+.book-card.dragging { opacity: 0.4; }
 
 /* 右键菜单 */
 .ctx-menu {

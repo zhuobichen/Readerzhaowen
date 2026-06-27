@@ -89,10 +89,9 @@ function renderSidebar() {
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       <span>新建分类</span>
     </button>`;
-  // 绑定点击
+  // 绑定点击 + 拖拽放置
   el.sidebar.querySelectorAll('.cat-item').forEach(node => {
     node.addEventListener('click', (e) => {
-      // 点击 ⋯ 按钮不触发筛选
       if (e.target.classList.contains('cat-menu-btn')) {
         e.stopPropagation();
         const r = node.getBoundingClientRect();
@@ -104,13 +103,31 @@ function renderSidebar() {
       renderSidebar();
       render();
     });
-    // 右键菜单
     node.addEventListener('contextmenu', (e) => {
       const cat = node.dataset.cat;
       if (cat === 'all' || cat === '__uncat__') return;
       e.preventDefault();
       showCatContextMenu(e.clientX, e.clientY, cat);
     });
+    // 拖拽放置: 书籍拖到分类项上
+    if (node.dataset.drop === 'cat') {
+      node.addEventListener('dragover', (e) => { e.preventDefault(); node.classList.add('drag-over'); });
+      node.addEventListener('dragleave', () => { node.classList.remove('drag-over'); });
+      node.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        node.classList.remove('drag-over');
+        const bookId = e.dataTransfer.getData('text/plain');
+        if (!bookId) return;
+        const dropCat = node.dataset.dropCat;
+        try {
+          await API.setCategory(bookId, dropCat);
+          load();
+          refreshCategories();
+        } catch (err) {
+          alert(err.message || '分类失败');
+        }
+      });
+    }
   });
   const addBtn = el.sidebar.querySelector('#cat-add-btn');
   if (addBtn) addBtn.addEventListener('click', addCategory);
@@ -118,7 +135,9 @@ function renderSidebar() {
 
 function renderCatItem(label, cat, count, active) {
   const isCustom = cat !== 'all' && cat !== '__uncat__';
-  return `<div class="cat-item${active ? ' active' : ''}" data-cat="${escapeHtml(cat)}" title="${escapeHtml(label)}">
+  const dropTarget = cat !== 'all' ? `data-drop="cat"` : '';
+  const dropCat = cat === '__uncat__' ? '' : escapeHtml(cat);
+  return `<div class="cat-item${active ? ' active' : ''}" data-cat="${escapeHtml(cat)}" ${dropTarget} data-drop-cat="${dropCat}" title="${escapeHtml(label)}">
     <span class="cat-name">${escapeHtml(label)}</span>
     <span class="cat-count">${count}</span>
     ${isCustom ? '<span class="cat-menu-btn" title="右键管理">⋯</span>' : ''}
@@ -239,8 +258,15 @@ function render() {
     const [a, c] = palette(b.title || b.name);
     card.querySelector('.cover-placeholder').style.background = `linear-gradient(150deg, ${a} 0%, ${c} 100%)`;
     card.addEventListener('click', () => openBook(b));
-    // 右键菜单
     card.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e.clientX, e.clientY, b); });
+    // 拖拽分类: 书籍卡片可拖到左侧分类项
+    card.draggable = true;
+    card.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', b.id);
+      e.dataTransfer.effectAllowed = 'move';
+      card.classList.add('dragging');
+    });
+    card.addEventListener('dragend', () => { card.classList.remove('dragging'); });
     // 分类标签点击 -> 弹出分类选择
     const catTag = card.querySelector('.book-cat-tag');
     if (catTag) catTag.addEventListener('click', (e) => {
