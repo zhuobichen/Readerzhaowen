@@ -1,9 +1,10 @@
-﻿// ai.js 鈥?AI 鍔╂墜锛氭偓娴寜閽?+ 瀵硅瘽闈㈡澘 + 娴佸紡鍝嶅簲 + 璁剧疆 + Agent 涓婁笅鏂?import API from './api.js';
+// ai.js — AI 助手：悬浮按钮 + 对话面板 + 流式响应 + 设置 + Agent 上下文
+import API from './api.js';
 
-let history = [];        // 瀵硅瘽鍘嗗彶 [{role, content}]
-let sending = false;     // 鏄惁姝ｅ湪鍙戦€?鎺ユ敹
-let el = {};             // DOM 鍏冪礌缂撳瓨
-let contextProvider = null; // 鍥炶皟锛氳幏鍙栧綋鍓嶉槄璇讳笂涓嬫枃
+let history = [];        // 对话历史 [{role, content}]
+let sending = false;     // 是否正在发送/接收
+let el = {};             // DOM 元素缓存
+let contextProvider = null; // 回调：获取当前阅读上下文
 
 const SVG_ROBOT = `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
   <rect x="4" y="7" width="16" height="12" rx="2.5"/>
@@ -25,18 +26,18 @@ const SVG_CLOSE = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" s
 const SVG_SEND = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>`;
 const SVG_CLEAR = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 4v5h5"/></svg>`;
 
-/** 鏋勫缓 FAB 涓庡璇濋潰鏉?DOM */
+/** 构建 FAB 与对话面板 DOM */
 function buildUI() {
-  // ---- 鎮诞鎸夐挳 ----
+  // ---- 悬浮按钮 ----
   const fab = document.createElement('button');
   fab.id = 'ai-fab';
   fab.className = 'ai-fab';
-  fab.title = 'AI 鍔╂墜';
-  fab.setAttribute('aria-label', 'AI 鍔╂墜');
+  fab.title = 'AI 助手';
+  fab.setAttribute('aria-label', 'AI 助手');
   fab.innerHTML = SVG_ROBOT;
   document.body.appendChild(fab);
 
-  // ---- 瀵硅瘽闈㈡澘 ----
+  // ---- 对话面板 ----
   const panel = document.createElement('div');
   panel.id = 'ai-panel';
   panel.className = 'ai-panel';
@@ -45,22 +46,22 @@ function buildUI() {
     <div class="ai-header">
       <div class="ai-title-wrap">
         <span class="ai-avatar-sm">${SVG_ROBOT}</span>
-        <span class="ai-title">AI 鍔╂墜</span>
+        <span class="ai-title">AI 助手</span>
       </div>
       <div class="ai-header-tools">
-        <button id="ai-clear-btn" class="ai-icon-btn" title="鏂板璇?>${SVG_CLEAR}</button>
-        <button id="ai-settings-btn" class="ai-icon-btn" title="璁剧疆">${SVG_GEAR}</button>
-        <button id="ai-close-btn" class="ai-icon-btn" title="鍏抽棴">${SVG_CLOSE}</button>
+        <button id="ai-clear-btn" class="ai-icon-btn" title="新对话">${SVG_CLEAR}</button>
+        <button id="ai-settings-btn" class="ai-icon-btn" title="设置">${SVG_GEAR}</button>
+        <button id="ai-close-btn" class="ai-icon-btn" title="关闭">${SVG_CLOSE}</button>
       </div>
     </div>
     <div class="ai-messages" id="ai-messages"></div>
     <div class="ai-input-area">
-      <textarea id="ai-input" rows="1" placeholder="杈撳叆娑堟伅锛孍nter 鍙戦€?/ Shift+Enter 鎹㈣"></textarea>
-      <button id="ai-send" class="ai-send-btn" title="鍙戦€?>${SVG_SEND}</button>
+      <textarea id="ai-input" rows="1" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
+      <button id="ai-send" class="ai-send-btn" title="发送">${SVG_SEND}</button>
     </div>`;
   document.body.appendChild(panel);
 
-  // 缂撳瓨鍏冪礌
+  // 缓存元素
   el.fab = fab;
   el.panel = panel;
   el.messages = panel.querySelector('#ai-messages');
@@ -70,7 +71,7 @@ function buildUI() {
   el.closeBtn = panel.querySelector('#ai-close-btn');
 }
 
-/** 璁剧疆寮圭獥锛堝湪 index.html 涓缃級 */
+/** 设置弹窗（在 index.html 中预置） */
 function bindSettings() {
   const modal = document.getElementById('ai-settings');
   if (!modal) return;
@@ -85,12 +86,12 @@ function bindSettings() {
   el.settingsKey = keyInp;
   el.settingsModel = modelInp;
 
-  // 鎵撳紑璁剧疆
+  // 打开设置
   el.settingsBtn.addEventListener('click', () => openSettings());
   if (closeBtn) closeBtn.addEventListener('click', () => { modal.hidden = true; });
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.hidden = true; });
 
-  // 淇濆瓨閰嶇疆
+  // 保存配置
   if (saveBtn) {
     saveBtn.addEventListener('click', async () => {
       const cfg = {
@@ -99,25 +100,26 @@ function bindSettings() {
         model: modelInp.value.trim(),
       };
       saveBtn.disabled = true;
-      saveBtn.textContent = '淇濆瓨涓€?;
+      saveBtn.textContent = '保存中…';
       try {
         await API.saveAIConfig(cfg);
         aiConfig.has_key = true;
         modal.hidden = true;
         keyInp.value = '';
-        keyInp.placeholder = '宸蹭繚瀛橈紙鐣欑┖鍒欎笉淇敼锛?;
+        keyInp.placeholder = '已保存（留空则不修改）';
       } catch (e) {
-        alert(e.message || '淇濆瓨澶辫触');
+        alert(e.message || '保存失败');
       } finally {
         saveBtn.disabled = false;
-        saveBtn.textContent = '淇濆瓨';
+        saveBtn.textContent = '保存';
       }
     });
   }
 }
 
-let aiConfig = { has_key: false };  // 缂撳瓨閰嶇疆鐘舵€?
-/** 鍔犺浇閰嶇疆骞堕濉缃〃鍗?*/
+let aiConfig = { has_key: false };  // 缓存配置状态
+
+/** 加载配置并预填设置表单 */
 async function loadConfig() {
   const cfg = await API.getAIConfig();
   aiConfig = cfg;
@@ -125,9 +127,9 @@ async function loadConfig() {
   if (el.settingsModel) el.settingsModel.value = cfg.model || '';
   if (el.settingsKey) {
     if (cfg.has_key) {
-      el.settingsKey.placeholder = '宸查厤缃紙鐣欑┖鍒欎笉淇敼锛?;
+      el.settingsKey.placeholder = '已配置（留空则不修改）';
     } else {
-      el.settingsKey.placeholder = '杈撳叆 API Key';
+      el.settingsKey.placeholder = '输入 API Key';
     }
   }
   return cfg;
@@ -138,29 +140,29 @@ function openSettings() {
   el.settingsModal.hidden = false;
 }
 
-/** 鎵撳紑闈㈡澘 */
+/** 打开面板 */
 function openPanel() {
   el.panel.hidden = false;
   el.fab.classList.add('active');
   requestAnimationFrame(() => el.panel.classList.add('open'));
   setTimeout(() => el.input.focus(), 60);
-  // 棣栨鎵撳紑鏄剧ず寤鸿寮曞
+  // 首次打开显示建议引导
   if (history.length === 0 && !el.messages.querySelector('.ai-suggestions')) {
     showSuggestions();
   }
 }
 
-/** 绌虹姸鎬佸缓璁?*/
+/** 空状态建议 */
 function showSuggestions() {
   const div = document.createElement('div');
   div.className = 'ai-suggestions';
   const tips = [
-    '鎬荤粨杩欐湰涔︾殑涓昏鍐呭',
-    '甯垜鎵句竴鏈叧浜庡巻鍙茬殑涔?,
-    '杩欐湰涔︾殑浣滆€呮槸璋侊紵',
-    '甯垜缁欎功鏋朵笂鐨勪功鍒嗙被',
+    '总结这本书的主要内容',
+    '帮我找一本关于历史的书',
+    '这本书的作者是谁？',
+    '帮我给书架上的书分类',
   ];
-  div.innerHTML = `<div class="ai-suggestion-title">璇曡瘯杩欎簺锛?/div>` +
+  div.innerHTML = `<div class="ai-suggestion-title">试试这些：</div>` +
     tips.map(t => `<button class="ai-suggestion-chip">${t}</button>`).join('');
   div.querySelectorAll('.ai-suggestion-chip').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -172,7 +174,7 @@ function showSuggestions() {
   el.messages.appendChild(div);
 }
 
-/** 鍏抽棴闈㈡澘 */
+/** 关闭面板 */
 function closePanel() {
   el.panel.classList.remove('open');
   el.fab.classList.remove('active');
@@ -184,7 +186,7 @@ function togglePanel() {
   else closePanel();
 }
 
-/** 杩藉姞涓€鏉℃秷鎭皵娉?*/
+/** 追加一条消息气泡 */
 function addMessage(role, content) {
   const wrap = document.createElement('div');
   wrap.className = 'ai-msg ' + (role === 'user' ? 'ai-msg-user' : 'ai-msg-ai');
@@ -202,7 +204,7 @@ function addMessage(role, content) {
   return wrap.querySelector('.ai-bubble');
 }
 
-/** 姝ｅ湪鎬濊€冩寚绀哄櫒 */
+/** 正在思考指示器 */
 function showTyping() {
   const wrap = document.createElement('div');
   wrap.className = 'ai-msg ai-msg-ai ai-typing-wrap';
@@ -223,23 +225,24 @@ function scrollToBottom() {
   el.messages.scrollTop = el.messages.scrollHeight;
 }
 
-/** 鍙戦€佹秷鎭苟娴佸紡鎺ユ敹鍥炲 */
+/** 发送消息并流式接收回复 */
 async function send() {
   if (sending) return;
   const text = el.input.value.trim();
   if (!text) return;
 
-  // 妫€鏌?AI 鏄惁宸查厤缃?  if (!aiConfig.has_key) {
-    addMessage('assistant', '璇峰厛閰嶇疆 AI API Key銆傜偣鍑诲彸涓婅璁剧疆鎸夐挳濉啓銆?);
+  // 检查 AI 是否已配置
+  if (!aiConfig.has_key) {
+    addMessage('assistant', '请先配置 AI API Key。点击右上角设置按钮填写。');
     openSettings();
     return;
   }
 
-  // 绉婚櫎寤鸿寮曞
+  // 移除建议引导
   el.messages.querySelector('.ai-suggestions')?.remove();
   addMessage('user', text);
   history.push({ role: 'user', content: text });
-  // 鍘嗗彶涓婇檺锛氫繚鐣欐渶杩?20 鏉★紙绾?10 杞璇濓級
+  // 历史上限：保留最近 20 条（约 10 轮对话）
   if (history.length > 20) {
     history = history.slice(-20);
   }
@@ -252,7 +255,8 @@ async function send() {
   let aiBubble = null;
   let firstChunk = true;
 
-  // 鑾峰彇褰撳墠闃呰涓婁笅鏂?  const ctx = contextProvider ? contextProvider() : {};
+  // 获取当前阅读上下文
+  const ctx = contextProvider ? contextProvider() : {};
 
   try {
     const resp = await API.aiChat(history, ctx);
@@ -290,16 +294,18 @@ async function send() {
     }
     removeTyping();
 
-    // 鏀堕泦瀹屾暣 AI 鍥炲鍒板巻鍙?    if (aiBubble) {
+    // 收集完整 AI 回复到历史
+    if (aiBubble) {
       history.push({ role: 'assistant', content: aiBubble.textContent });
     } else if (firstChunk) {
-      // 鏈敹鍒颁换浣曞唴瀹?      removeTyping();
-      aiBubble = addMessage('assistant', '锛堟病鏈夋敹鍒板洖澶嶏紝璇锋鏌?AI 閰嶇疆鎴栫◢鍚庨噸璇曪級');
+      // 未收到任何内容
+      removeTyping();
+      aiBubble = addMessage('assistant', '（没有收到回复，请检查 AI 配置或稍后重试）');
     }
   } catch (e) {
     removeTyping();
     if (!aiBubble) aiBubble = addMessage('assistant', '');
-    aiBubble.textContent += `\n[鍑洪敊] ${e.message || e}`;
+    aiBubble.textContent += `\n[出错] ${e.message || e}`;
   } finally {
     sending = false;
     el.send.disabled = false;
@@ -307,7 +313,7 @@ async function send() {
   }
 }
 
-/** 鎵ц AI 杩斿洖鐨勫姩浣?*/
+/** 执行 AI 返回的动作 */
 function executeActions(actions) {
   if (!Array.isArray(actions)) return;
   for (const a of actions) {
@@ -317,15 +323,15 @@ function executeActions(actions) {
   }
 }
 
-/** textarea 鑷€傚簲楂樺害 */
+/** textarea 自适应高度 */
 function autoGrow() {
   el.input.style.height = 'auto';
   el.input.style.height = Math.min(el.input.scrollHeight, 120) + 'px';
 }
 
-/** 娓呯┖瀵硅瘽锛屽紑濮嬫柊浼氳瘽 */
+/** 清空对话，开始新会话 */
 function clearChat() {
-  if (history.length > 0 && !confirm('娓呯┖褰撳墠瀵硅瘽锛?)) return;
+  if (history.length > 0 && !confirm('清空当前对话？')) return;
   history = [];
   el.messages.innerHTML = '';
   showSuggestions();
@@ -344,7 +350,7 @@ function bind() {
       send();
     }
   });
-  // Esc 鍏抽棴
+  // Esc 关闭
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !el.panel.hidden) closePanel();
   });
@@ -363,4 +369,3 @@ function setContextProvider(fn) {
 
 export { init, openPanel, closePanel, setContextProvider };
 export default { init, openPanel, closePanel, setContextProvider };
-
