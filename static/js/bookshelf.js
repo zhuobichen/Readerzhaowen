@@ -5,6 +5,7 @@ import { CoverStore, makePlaceholderCover } from './store.js';
 let allBooks = [];
 let categories = [];            // [{name, count}]
 let currentCategory = null;    // null=全部, '__uncat__'=未分类, 其它=分类名
+let catCollapsed = false;     // 分类侧栏折叠状态
 let io = null;          // IntersectionObserver 懒加载封面
 const pendingCovers = new Set();
 
@@ -84,11 +85,23 @@ function renderSidebar() {
     items.push(renderCatItem(name, name, cnt, currentCategory === name));
   }
   el.sidebar.innerHTML = `
-    <div class="cat-list">${items.join('')}</div>
-    <button class="cat-add" id="cat-add-btn" title="新建分类">
+    <div class="cat-section-title" id="cat-toggle">
+      <span>分类</span>
+      <svg id="cat-toggle-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transform: ${catCollapsed ? 'rotate(-90deg)' : 'rotate(0)'}; transition: transform .2s;"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
+    <div class="cat-list" style="${catCollapsed ? 'display:none;' : ''}">${items.join('')}</div>
+    <button class="cat-add" id="cat-add-btn" title="新建分类" style="${catCollapsed ? 'display:none;' : ''}">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       <span>新建分类</span>
     </button>`;
+  // 折叠/展开
+  const toggle = el.sidebar.querySelector('#cat-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      catCollapsed = !catCollapsed;
+      renderSidebar();
+    });
+  }
   // 绑定点击 + 拖拽放置
   el.sidebar.querySelectorAll('.cat-item').forEach(node => {
     node.addEventListener('click', (e) => {
@@ -129,8 +142,9 @@ function renderSidebar() {
       });
     }
   });
+  // 新建分类按钮 (用 onclick 确保每次重建后只绑定一次)
   const addBtn = el.sidebar.querySelector('#cat-add-btn');
-  if (addBtn) addBtn.addEventListener('click', addCategory);
+  if (addBtn) addBtn.onclick = () => addCategory();
 }
 
 function renderCatItem(label, cat, count, active) {
@@ -151,7 +165,9 @@ async function addCategory() {
   try {
     await API.createCategory(name.trim());
     await refreshCategories();
+    if (typeof load === 'function') load();
   } catch (e) {
+    console.error('新建分类失败:', e);
     alert(e.message || '新建分类失败');
   }
 }
@@ -194,9 +210,11 @@ function showCatContextMenu(x, y, catName) {
     }
   });
   document.body.appendChild(menu);
-  const rect = menu.getBoundingClientRect();
-  if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 10) + 'px';
-  if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+  requestAnimationFrame(() => {
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = Math.max(10, window.innerWidth - rect.width - 10) + 'px';
+    if (rect.bottom > window.innerHeight) menu.style.top = Math.max(10, window.innerHeight - rect.height - 10) + 'px';
+  });
 }
 
 function buildFormatFilter() {
@@ -403,10 +421,12 @@ function showContextMenu(x, y, book) {
     }
   });
   document.body.appendChild(menu);
-  // 越界修正
-  const rect = menu.getBoundingClientRect();
-  if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 10) + 'px';
-  if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+  // 越界修正 (下一帧确保布局已完成)
+  requestAnimationFrame(() => {
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = Math.max(10, window.innerWidth - rect.width - 10) + 'px';
+    if (rect.bottom > window.innerHeight) menu.style.top = Math.max(10, window.innerHeight - rect.height - 10) + 'px';
+  });
 }
 
 // ---- 分类选择器 ----
@@ -436,9 +456,12 @@ async function showCategoryPicker(x, y, book) {
     });
   });
   document.body.appendChild(picker);
-  const rect = picker.getBoundingClientRect();
-  if (rect.right > window.innerWidth) picker.style.left = (window.innerWidth - rect.width - 10) + 'px';
-  if (rect.bottom > window.innerHeight) picker.style.top = (window.innerHeight - rect.height - 10) + 'px';
+  // 越界修正 (下一帧确保布局已完成)
+  requestAnimationFrame(() => {
+    const rect = picker.getBoundingClientRect();
+    if (rect.right > window.innerWidth) picker.style.left = Math.max(10, window.innerWidth - rect.width - 10) + 'px';
+    if (rect.bottom > window.innerHeight) picker.style.top = Math.max(10, window.innerHeight - rect.height - 10) + 'px';
+  });
 }
 
 function closeMenus() {
