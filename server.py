@@ -727,12 +727,14 @@ AI_SYSTEM_PROMPT = """你是「阅微」, 一个本地电子书书架的智能 A
 4. get_book_metadata - 获取书籍元数据 (标题/作者/分类/进度)
 5. categorize_book - 为书籍设置分类
 6. list_categories - 列出所有已创建的分类
-7. delete_book - 删除一本书 (删除文件)
-8. open_book - 在阅读器中打开一本书 (前端会执行打开操作)
-9. create_note - 为一本书创建笔记
-10. remember_preference - 将用户偏好或重要事实保存到长期记忆
-11. recall_memory - 从长期记忆中检索与查询相关的记忆
-12. get_reading_context - 获取用户当前正在阅读的书籍上下文
+7. rename_category - 重命名分类 (该分类下所有书籍同步更新)
+8. delete_category - 删除分类 (书籍归入未分类)
+9. delete_book - 删除一本书 (删除文件)
+10. open_book - 在阅读器中打开一本书 (前端会执行打开操作)
+11. create_note - 为一本书创建笔记
+12. remember_preference - 将用户偏好或重要事实保存到长期记忆
+13. recall_memory - 从长期记忆中检索与查询相关的记忆
+14. get_reading_context - 获取用户当前正在阅读的书籍上下文
 
 ## 行为规则
 - 用简洁友好的中文回答。
@@ -847,6 +849,60 @@ def _tool_list_categories(args, context):
         counts[c] = counts.get(c, 0) + 1
     data = [{"name": c, "count": counts.get(c, 0)} for c in cats]
     return make_tool_result(True, data={"categories": data, "count": len(data)})
+
+
+def _tool_rename_category(args, context):
+    old_name = (args.get("old_name", "") or "").strip()
+    new_name = (args.get("new_name", "") or "").strip()
+    if not old_name or not new_name:
+        return make_tool_result(False, error="old_name 和 new_name 都不能为空", retryable=False)
+    lib = load_library()
+    cats = lib.setdefault("categories", [])
+    if old_name not in cats:
+        # 也检查书籍中是否有此分类
+        has_books = any(m.get("category") == old_name for m in lib.get("books", {}).values())
+        if not has_books:
+            return make_tool_result(False, error="分类「{}」不存在".format(old_name), retryable=False)
+    # 更新分类列表
+    if old_name in cats:
+        cats.remove(old_name)
+    if new_name not in cats:
+        cats.append(new_name)
+    # 更新所有书籍的分类引用
+    affected = 0
+    for meta in lib.get("books", {}).values():
+        if meta.get("category") == old_name:
+            meta["category"] = new_name
+            affected += 1
+    save_library(lib)
+    return make_tool_result(True, data={
+        "oldName": old_name, "newName": new_name,
+        "affectedBooks": affected,
+        "message": "已将分类「{}」重命名为「{}」({}本书受影响)".format(old_name, new_name, affected),
+    })
+
+
+def _tool_delete_category(args, context):
+    name = (args.get("name", "") or "").strip()
+    if not name:
+        return make_tool_result(False, error="分类名称不能为空", retryable=False)
+    lib = load_library()
+    cats = lib.get("categories", [])
+    if name not in cats:
+        return make_tool_result(False, error="分类「{}」不存在".format(name), retryable=False)
+    cats.remove(name)
+    # 该分类下的书籍归入未分类
+    affected = 0
+    for meta in lib.get("books", {}).values():
+        if meta.get("category") == name:
+            meta["category"] = ""
+            affected += 1
+    save_library(lib)
+    return make_tool_result(True, data={
+        "deletedCategory": name,
+        "affectedBooks": affected,
+        "message": "已删除分类「{}」, {}本书归入未分类".format(name, affected),
+    })
 
 
 def _tool_delete_book(args, context):
@@ -996,6 +1052,29 @@ TOOL_DEFS = [
         "description": "列出所有已创建的分类及每个分类的书籍数量",
         "parameters": {"type": "object", "properties": {}},
         "handler": _tool_list_categories,
+    },
+    {
+        "name": "rename_category",
+        "description": "重命名一个分类, 该分类下所有书籍的分类引用会同步更新",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "old_name": {"type": "string", "description": "当前分类名称"},
+                "new_name": {"type": "string", "description": "新的分类名称"},
+            },
+            "required": ["old_name", "new_name"],
+        },
+        "handler": _tool_rename_category,
+    },
+    {
+        "name": "delete_category",
+        "description": "删除一个分类, 该分类下的书籍将归入未分类",
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "要删除的分类名称"}},
+            "required": ["name"],
+        },
+        "handler": _tool_delete_category,
     },
     {
         "name": "delete_book",

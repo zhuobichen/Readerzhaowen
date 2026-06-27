@@ -91,11 +91,25 @@ function renderSidebar() {
     </button>`;
   // 绑定点击
   el.sidebar.querySelectorAll('.cat-item').forEach(node => {
-    node.addEventListener('click', () => {
+    node.addEventListener('click', (e) => {
+      // 点击 ⋯ 按钮不触发筛选
+      if (e.target.classList.contains('cat-menu-btn')) {
+        e.stopPropagation();
+        const r = node.getBoundingClientRect();
+        showCatContextMenu(r.right, r.bottom + 2, node.dataset.cat);
+        return;
+      }
       const cat = node.dataset.cat;
       currentCategory = cat === 'all' ? null : (cat === '__uncat__' ? '__uncat__' : cat);
       renderSidebar();
       render();
+    });
+    // 右键菜单
+    node.addEventListener('contextmenu', (e) => {
+      const cat = node.dataset.cat;
+      if (cat === 'all' || cat === '__uncat__') return;
+      e.preventDefault();
+      showCatContextMenu(e.clientX, e.clientY, cat);
     });
   });
   const addBtn = el.sidebar.querySelector('#cat-add-btn');
@@ -103,9 +117,11 @@ function renderSidebar() {
 }
 
 function renderCatItem(label, cat, count, active) {
+  const isCustom = cat !== 'all' && cat !== '__uncat__';
   return `<div class="cat-item${active ? ' active' : ''}" data-cat="${escapeHtml(cat)}" title="${escapeHtml(label)}">
     <span class="cat-name">${escapeHtml(label)}</span>
     <span class="cat-count">${count}</span>
+    ${isCustom ? '<span class="cat-menu-btn" title="右键管理">⋯</span>' : ''}
   </div>`;
 }
 
@@ -119,6 +135,49 @@ async function addCategory() {
   } catch (e) {
     alert(e.message || '新建分类失败');
   }
+}
+
+/** 分类右键菜单: 重命名 / 删除 */
+function showCatContextMenu(x, y, catName) {
+  closeMenus();
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  menu.id = 'ctx-menu-active';
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  menu.innerHTML = `
+    <button data-act="rename">重命名分类</button>
+    <hr>
+    <button class="ctx-danger" data-act="del">删除分类</button>`;
+  menu.querySelector('[data-act="rename"]').addEventListener('click', async () => {
+    closeMenus();
+    const newName = prompt('重命名分类为：', catName);
+    if (!newName || !newName.trim() || newName.trim() === catName) return;
+    try {
+      await API.renameCategory(catName, newName.trim());
+      if (currentCategory === catName) currentCategory = newName.trim();
+      await refreshCategories();
+      render();
+    } catch (e) {
+      alert(e.message || '重命名失败');
+    }
+  });
+  menu.querySelector('[data-act="del"]').addEventListener('click', async () => {
+    closeMenus();
+    if (!confirm(`删除分类「${catName}」？\n该分类下的书籍将归入"未分类"。`)) return;
+    try {
+      await API.deleteCategory(catName);
+      if (currentCategory === catName) currentCategory = null;
+      await refreshCategories();
+      render();
+    } catch (e) {
+      alert(e.message || '删除失败');
+    }
+  });
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 10) + 'px';
 }
 
 function buildFormatFilter() {

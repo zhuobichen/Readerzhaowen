@@ -751,6 +751,13 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
   margin-left: 6px;
 }
 .cat-item.active .cat-count { background: var(--accent); color: #1a1208; }
+.cat-menu-btn {
+  display: none; cursor: pointer;
+  font-size: 16px; color: var(--text-mute);
+  padding: 0 4px; line-height: 1;
+}
+.cat-item:hover .cat-menu-btn { display: flex; }
+.cat-menu-btn:hover { color: var(--accent); }
 
 /* 右键菜单 */
 .ctx-menu {

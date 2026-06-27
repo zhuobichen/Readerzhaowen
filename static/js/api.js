@@ -91,6 +91,18 @@ const API = {
     } catch (e) { throw e; }
   },
 
+  async renameCategory(oldName, newName) {
+    try {
+      const r = await fetch('/api/categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName, old_name: oldName }),
+      });
+      if (!r.ok) throw new Error('重命名分类失败');
+      return await r.json();
+    } catch (e) { throw e; }
+  },
+
   async deleteCategory(name) {
     try {
       const r = await fetch(`/api/categories/${encodeURIComponent(name)}`, { method: 'DELETE' });
