@@ -148,9 +148,12 @@ def _tool_web_search(args, context):
         return make_tool_result(False, error="搜索关键词不能为空", retryable=False)
     try:
         import re as _re
-        url = "https://www.bing.com/search?q=" + urllib.parse.quote(query) + "&count=10"
+        # Bing 中文分词有问题: 加引号反而拆词(人工智能→人工)
+        # 解决: 不加引号 + setlang=en-US + mkt=en-US 让 Bing 用英文索引
+        url = "https://www.bing.com/search?q=" + urllib.parse.quote(query) + "&count=10&setlang=en-US&mkt=en-US"
         req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
         })
         with urllib.request.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
@@ -173,9 +176,25 @@ def _tool_web_search(args, context):
                 snippet = _re.sub(r'<[^>]+>', '', snip_match.group(1)).strip()[:200]
             if title and raw_url:
                 results.append({"title": title, "url": raw_url, "snippet": snippet})
+        # 额外提取页面中所有 PDF/EPUB 直链 (在 b_algo 之外的链接中)
+        all_links = _re.findall(r'href="(https?://[^"]+)"', html)
+        file_links = []
+        for l in all_links:
+            lower = l.lower()
+            if lower.endswith('.pdf') or lower.endswith('.epub') or lower.endswith('.txt') or lower.endswith('.mobi') or lower.endswith('.azw3'):
+                # 去重
+                if l not in file_links:
+                    file_links.append(l)
         if not results:
             return make_tool_result(True, data={"results": [], "message": "未找到相关结果, 请尝试其他关键词"})
-        return make_tool_result(True, data={"results": results[:10], "count": len(results[:10]), "query": query})
+        return make_tool_result(True, data={
+            "results": results[:10],
+            "count": len(results[:10]),
+            "query": query,
+            "file_links": file_links[:5],
+            "file_links_count": len(file_links),
+            "tip": "results 是网页结果; file_links 是直接的 PDF/EPUB/TXT 下载链接, 可直接用于 download_book 工具" if file_links else "",
+        })
     except Exception as e:
         return make_tool_result(False, error="搜索失败: {}".format(str(e)), retryable=True)
 
@@ -967,7 +986,9 @@ AI_SYSTEM_PROMPT = """你是「阅微」, 一个本地电子书书架的智能 A
 - 用简洁友好的中文回答。
 - 当用户要求总结一本书时, 先调用 get_book_content 获取内容, 再进行总结。
 - **当用户要求分类多本书时, 先调用 list_books 获取书单, 然后直接用 batch_categorize 一次性完成全部分类, 不要逐本调用 categorize_book。**
-- **当用户要求下载书籍时: 先用 web_search 搜索书籍下载链接, 找到直链后用 download_book 下载并自动导入书架。**
+- **当用户要求下载书籍时: 1) 先用 web_search 搜索 "书名 作者 pdf" (不要加引号, 不要加 filetype), 2) 检查返回的 file_links 字段是否有 PDF 直链, 3) 如果有就调用 download_book 下载, 4) 如果没有 file_links, 换个搜索词再搜一次 (如英文书名), 5) 最多搜索 3 次, 不要无限搜索.**
+- **重要: 搜索次数不要超过 3 次, 如果 3 次都没找到 PDF 直链, 就基于知识库推荐书籍并告知用户.**
+- **不要在同一 step 中调用 3 次 web_search, 每次只搜 1 个关键词, 看结果再决定下一步.**
 - 如果用户提到偏好或重要信息, 主动调用 remember_preference 保存到长期记忆。
 - 不要用相同参数重复调用同一个工具, 请直接使用之前返回的结果。
 - 工具调用失败时不要无限重试, 基于已有信息回答即可。
