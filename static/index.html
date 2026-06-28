@@ -36,6 +36,10 @@
         <option value="added">添加时间</option>
         <option value="custom">自定义</option>
       </select>
+      <button id="btn-view-mode" class="icon-btn" title="切换书架样式">
+        <svg id="view-icon-grid" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        <svg id="view-icon-shelf" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><path d="M2 6h20M2 14h20M2 20h20"/><path d="M5 6v8M9 6v8M14 6v8M18 6v8"/></svg>
+      </button>
       <input type="file" id="file-input" accept=".pdf,.epub,.txt,.mobi,.azw3,.fb2,.cbz,.cbr,.docx" hidden multiple>
       <button id="btn-upload" class="icon-btn" title="导入书籍">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>

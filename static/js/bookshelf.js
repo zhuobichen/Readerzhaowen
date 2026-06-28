@@ -17,7 +17,11 @@ const el = {
   format: document.getElementById('filter-format'),
   sort: document.getElementById('sort-by'),
   sidebar: document.getElementById('category-sidebar'),
+  viewBtn: document.getElementById('btn-view-mode'),
 };
+
+// 视图模式: 'grid' 网格, 'shelf' 古典书架
+let viewMode = localStorage.getItem('shelf-view-mode') || 'grid';
 
 // 右键菜单与分类选择器（动态创建，复用单例）
 let ctxMenuEl = null;
@@ -325,87 +329,172 @@ function render() {
   el.shelf.hidden = list.length === 0;
   if (!list.length) { el.shelf.innerHTML = ''; return; }
   initObserver();
+  updateViewIcon();
 
+  if (viewMode === 'shelf') {
+    renderShelfView(list);
+  } else {
+    renderGridView(list);
+  }
+}
+
+/** 更新视图切换图标 */
+function updateViewIcon() {
+  const gridIcon = document.getElementById('view-icon-grid');
+  const shelfIcon = document.getElementById('view-icon-shelf');
+  if (!gridIcon || !shelfIcon) return;
+  if (viewMode === 'shelf') {
+    gridIcon.style.display = 'none';
+    shelfIcon.style.display = '';
+    el.viewBtn.title = '当前: 古典书架 | 点击切换为网格';
+  } else {
+    gridIcon.style.display = '';
+    shelfIcon.style.display = 'none';
+    el.viewBtn.title = '当前: 网格 | 点击切换为古典书架';
+  }
+}
+
+/** 网格视图（原 render 逻辑） */
+function renderGridView(list) {
+  el.shelf.className = 'shelf-grid';
   const frag = document.createDocumentFragment();
   for (const b of list) {
-    const card = document.createElement('button');
-    card.className = 'book-card';
-    card.dataset.id = b.id;
-    card.dataset.format = b.format;
-    card.innerHTML = `
-      <div class="book-cover">
-        <span class="fmt-badge">${b.format.toUpperCase()}</span>
-        <div class="cover-placeholder">
-          <span class="cp-title"></span>
-          <span class="cp-fmt">${b.format.toUpperCase()}</span>
-        </div>
-        ${b.progress > 0 ? `<div class="cover-progress"><i style="width:${Math.min(100, b.progress * 100)}%"></i></div>` : ''}
-      </div>
-      <div class="book-meta">
-        <div class="book-title">${escapeHtml(b.title || b.name)}</div>
-        ${b.author ? `<div class="book-author">${escapeHtml(b.author)}</div>` : ''}
-        ${b.category ? `<div class="book-cat" data-cat="${escapeHtml(b.category)}"><span class="book-cat-tag">${escapeHtml(b.category)}</span></div>` : ''}
-      </div>`;
-    card.querySelector('.cp-title').textContent = b.title || b.name;
-    // 占位色板先填上，避免纯灰
-    const [a, c] = palette(b.title || b.name);
-    card.querySelector('.cover-placeholder').style.background = `linear-gradient(150deg, ${a} 0%, ${c} 100%)`;
-    card.addEventListener('click', () => openBook(b));
-    card.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e.clientX, e.clientY, b); });
-    // 拖拽分类: 书籍卡片可拖到左侧分类项; 自定义排序模式下可拖到另一本书上交换位置
-    card.draggable = true;
-    card.addEventListener('dragstart', (e) => {
-      e.dataTransfer.setData('text/plain', b.id);
-      e.dataTransfer.effectAllowed = 'move';
-      card.classList.add('dragging');
-      showTrashBin(true);
-    });
-    card.addEventListener('dragover', (e) => {
-      // 自定义排序模式下, 允许拖到另一本书上
-      if (el.sort.value === 'custom' && !card.classList.contains('dragging')) {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        card.classList.add('drag-over');
-      }
-    });
-    card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
-    card.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      card.classList.remove('drag-over');
-      const draggedId = e.dataTransfer.getData('text/plain');
-      if (!draggedId || draggedId === b.id) return;
-      if (el.sort.value !== 'custom') return;
-      // 交换位置
-      try {
-        await API.reorderBooks(draggedId, b.id);
-        // 更新本地 position
-        const a = allBooks.find(x => x.id === draggedId);
-        const c = allBooks.find(x => x.id === b.id);
-        if (a && c) {
-          const tmp = a.position;
-          a.position = c.position;
-          c.position = tmp;
-        }
-        render();
-      } catch (err) { console.error('reorder failed:', err); }
-    });
-    card.addEventListener('dragend', () => {
-      card.classList.remove('dragging');
-      card.classList.remove('drag-over');
-      showTrashBin(false);
-    });
-    // 分类标签点击 -> 弹出分类选择
-    const catTag = card.querySelector('.book-cat-tag');
-    if (catTag) catTag.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const r = catTag.getBoundingClientRect();
-      showCategoryPicker(r.left, r.bottom + 4, b);
-    });
+    const card = createBookCard(b);
     frag.appendChild(card);
     io.observe(card);
   }
   el.shelf.innerHTML = '';
   el.shelf.appendChild(frag);
+}
+
+/** 古典书架视图 */
+function renderShelfView(list) {
+  el.shelf.className = 'shelf-classic';
+  el.shelf.innerHTML = '';
+
+  // 每行 8 本书
+  const perRow = 8;
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < list.length; i += perRow) {
+    const row = list.slice(i, i + perRow);
+    const shelfRow = document.createElement('div');
+    shelfRow.className = 'shelf-row';
+    // 书籍区域
+    const booksArea = document.createElement('div');
+    booksArea.className = 'shelf-books';
+    for (const b of row) {
+      const card = createShelfCard(b);
+      booksArea.appendChild(card);
+      io.observe(card);
+    }
+    shelfRow.appendChild(booksArea);
+    // 木板
+    const plank = document.createElement('div');
+    plank.className = 'shelf-plank';
+    shelfRow.appendChild(plank);
+    frag.appendChild(shelfRow);
+  }
+  el.shelf.appendChild(frag);
+}
+
+/** 创建网格模式卡片 */
+function createBookCard(b) {
+  const card = document.createElement('button');
+  card.className = 'book-card';
+  card.dataset.id = b.id;
+  card.dataset.format = b.format;
+  card.innerHTML = `
+    <div class="book-cover">
+      <span class="fmt-badge">${b.format.toUpperCase()}</span>
+      <div class="cover-placeholder">
+        <span class="cp-title"></span>
+        <span class="cp-fmt">${b.format.toUpperCase()}</span>
+      </div>
+      ${b.progress > 0 ? `<div class="cover-progress"><i style="width:${Math.min(100, b.progress * 100)}%"></i></div>` : ''}
+    </div>
+    <div class="book-meta">
+      <div class="book-title">${escapeHtml(b.title || b.name)}</div>
+      ${b.author ? `<div class="book-author">${escapeHtml(b.author)}</div>` : ''}
+      ${b.category ? `<div class="book-cat" data-cat="${escapeHtml(b.category)}"><span class="book-cat-tag">${escapeHtml(b.category)}</span></div>` : ''}
+    </div>`;
+  card.querySelector('.cp-title').textContent = b.title || b.name;
+  const [a, c] = palette(b.title || b.name);
+  card.querySelector('.cover-placeholder').style.background = `linear-gradient(150deg, ${a} 0%, ${c} 100%)`;
+  bindCardEvents(card, b);
+  return card;
+}
+
+/** 创建古典书架卡片（竖排放置在书架上） */
+function createShelfCard(b) {
+  const card = document.createElement('button');
+  card.className = 'shelf-book';
+  card.dataset.id = b.id;
+  card.dataset.format = b.format;
+  // 书脊样式：随机高度+色板
+  const [a, c] = palette(b.title || b.name);
+  const h = 150 + (b.title?.length % 3) * 15;
+  card.style.cssText = `--spine-c1:${a};--spine-c2:${c};--spine-h:${h}px;`;
+  card.innerHTML = `
+    <div class="spine-cover">
+      <span class="fmt-badge">${b.format.toUpperCase()}</span>
+      <div class="cover-placeholder">
+        <span class="cp-title"></span>
+        <span class="cp-fmt">${b.format.toUpperCase()}</span>
+      </div>
+      ${b.progress > 0 ? `<div class="cover-progress"><i style="width:${Math.min(100, b.progress * 100)}%"></i></div>` : ''}
+    </div>
+    <div class="spine-title">${escapeHtml(b.title || b.name)}</div>`;
+  card.querySelector('.cp-title').textContent = b.title || b.name;
+  card.querySelector('.cover-placeholder').style.background = `linear-gradient(150deg, ${a} 0%, ${c} 100%)`;
+  card.title = b.title || b.name;
+  bindCardEvents(card, b);
+  return card;
+}
+
+/** 绑定卡片通用事件（右键、拖拽等） */
+function bindCardEvents(card, b) {
+  card.addEventListener('click', () => openBook(b));
+  card.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e.clientX, e.clientY, b); });
+  card.draggable = true;
+  card.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', b.id);
+    e.dataTransfer.effectAllowed = 'move';
+    card.classList.add('dragging');
+    showTrashBin(true);
+  });
+  card.addEventListener('dragover', (e) => {
+    if (el.sort.value === 'custom' && !card.classList.contains('dragging')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      card.classList.add('drag-over');
+    }
+  });
+  card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+  card.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    card.classList.remove('drag-over');
+    const draggedId = e.dataTransfer.getData('text/plain');
+    if (!draggedId || draggedId === b.id) return;
+    if (el.sort.value !== 'custom') return;
+    try {
+      await API.reorderBooks(draggedId, b.id);
+      const a = allBooks.find(x => x.id === draggedId);
+      const c = allBooks.find(x => x.id === b.id);
+      if (a && c) { const tmp = a.position; a.position = c.position; c.position = tmp; }
+      render();
+    } catch (err) { console.error('reorder failed:', err); }
+  });
+  card.addEventListener('dragend', () => {
+    card.classList.remove('dragging');
+    card.classList.remove('drag-over');
+    showTrashBin(false);
+  });
+  const catTag = card.querySelector('.book-cat-tag');
+  if (catTag) catTag.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const r = catTag.getBoundingClientRect();
+    showCategoryPicker(r.left, r.bottom + 4, b);
+  });
 }
 
 function palette(seed) {
@@ -586,6 +675,11 @@ function bind() {
   el.search.addEventListener('input', () => { clearTimeout(t); t = setTimeout(render, 160); });
   el.format.addEventListener('change', render);
   el.sort.addEventListener('change', render);
+  el.viewBtn.addEventListener('click', () => {
+    viewMode = viewMode === 'grid' ? 'shelf' : 'grid';
+    localStorage.setItem('shelf-view-mode', viewMode);
+    render();
+  });
   document.getElementById('btn-refresh').addEventListener('click', load);
   document.getElementById('btn-empty-refresh').addEventListener('click', load);
   // 点击空白关闭菜单

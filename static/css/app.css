@@ -198,6 +198,125 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
   max-width: 1500px;
   margin: 0 auto;
 }
+.shelf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 30px 26px;
+  max-width: 1500px;
+  margin: 0 auto;
+}
+
+/* ============================ 古典书架 ============================ */
+.shelf-classic {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 20px 0;
+}
+.shelf-row {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 10px;
+}
+.shelf-books {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 30px;
+  min-height: 180px;
+}
+.shelf-plank {
+  height: 14px;
+  background: linear-gradient(180deg, #8b6f47 0%, #6b5230 30%, #5a4525 60%, #4a3820 100%);
+  border-radius: 0 0 4px 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,220,180,0.15);
+  position: relative;
+  margin: 0 10px;
+}
+.shelf-plank::before {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: -2px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(255,200,140,0.2), transparent);
+}
+[data-theme="light"] .shelf-plank {
+  background: linear-gradient(180deg, #b08855 0%, #8a6435 30%, #7a5225 60%, #6a4515 100%);
+}
+
+/* 书脊卡片 */
+.shelf-book {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: var(--spine-h, 160px);
+  transition: transform 0.15s ease;
+  position: relative;
+}
+.shelf-book:hover { transform: translateY(-8px); }
+.shelf-book:hover .spine-cover { box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+.shelf-book.drag-over .spine-cover { box-shadow: 0 0 0 2px var(--accent); }
+
+.spine-cover {
+  width: 48px;
+  height: 100%;
+  border-radius: 3px 3px 0 0;
+  overflow: hidden;
+  position: relative;
+  box-shadow: 2px 0 6px rgba(0,0,0,0.3), inset -2px 0 4px rgba(0,0,0,0.2);
+  display: flex;
+  flex-direction: column;
+  background: var(--spine-c1, #3a2e22);
+}
+.spine-cover .cover-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 4px;
+  background: linear-gradient(180deg, var(--spine-c1) 0%, var(--spine-c2) 100%);
+}
+.spine-cover .cp-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255,230,200,0.85);
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-height: 100px;
+  letter-spacing: 0.05em;
+}
+.spine-cover .cp-fmt { display: none; }
+.spine-cover .fmt-badge {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 7px;
+  padding: 1px 3px;
+}
+.spine-cover .cover-progress {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 3px;
+}
+.spine-title {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  max-width: 70px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
 
 .book-card {
   display: flex;
@@ -362,11 +481,12 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
   border-bottom: 1px solid var(--line);
   background: var(--bg-elev);
   overflow: hidden;
-  transition: max-height 0.3s ease, opacity 0.25s ease, border-color 0.25s ease, padding 0.3s ease;
+  transition: flex-basis 0.3s ease, max-height 0.3s ease, opacity 0.25s ease, border-color 0.25s ease, padding 0.3s ease;
   max-height: var(--readerbar-h);
   opacity: 1;
 }
 .reader-bar.collapsed {
+  flex-basis: 0;
   max-height: 0;
   opacity: 0;
   padding-top: 0;
