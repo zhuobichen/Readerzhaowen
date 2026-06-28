@@ -361,6 +361,17 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
   padding: 0 18px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-elev);
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.25s ease, border-color 0.25s ease, padding 0.3s ease;
+  max-height: var(--readerbar-h);
+  opacity: 1;
+}
+.reader-bar.collapsed {
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-bottom-color: transparent;
 }
 .reader-title { flex: 1 1 auto; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .reader-title-name {

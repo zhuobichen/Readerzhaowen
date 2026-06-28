@@ -7,6 +7,7 @@ const UNSUPPORTED = new Set(['mobi', 'azw3', 'docx', 'fb2', 'cbr']);
 const ui = {
   area: document.getElementById('reader-area'),
   stage: document.querySelector('.reader-stage'),
+  bar: document.querySelector('.reader-bar'),
   title: document.getElementById('reader-title'),
   fmt: document.getElementById('reader-fmt'),
   pageInfo: document.getElementById('page-info'),
@@ -140,9 +141,10 @@ function bindControls() {
   });
   document.addEventListener('keydown', onKey);
 
-  // 点击阅读区域切换底部工具栏展开/收起
+  // 点击阅读区域切换顶部标题栏和底部工具栏同时展开/收起
   ui.area.addEventListener('click', () => {
     ui.foot.classList.toggle('collapsed');
+    ui.bar.classList.toggle('collapsed');
   });
 }
 
@@ -208,6 +210,9 @@ async function open(book) {
   ui.area.innerHTML = '';
   ui.pageInfo.textContent = '加载中…';
   ui.slider.value = 0;
+  // 默认收起顶部栏和底部栏
+  ui.bar.classList.add('collapsed');
+  ui.foot.classList.add('collapsed');
   ui.pct.textContent = '0%';
 
   const saved = await API.getProgress(book.id);
