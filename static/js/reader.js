@@ -27,6 +27,7 @@ const ui = {
   tocBookName: document.getElementById('toc-book-name'),
   zoomLvl: document.getElementById('zoom-level'),
   back: document.getElementById('reader-back'),
+  foot: document.querySelector('.reader-foot'),
 };
 
 let active = null;     // 当前阅读器实例
@@ -138,6 +139,11 @@ function bindControls() {
     seeking = false;
   });
   document.addEventListener('keydown', onKey);
+
+  // 点击阅读区域切换底部工具栏展开/收起
+  ui.area.addEventListener('click', () => {
+    ui.foot.classList.toggle('collapsed');
+  });
 }
 
 function onKey(e) {

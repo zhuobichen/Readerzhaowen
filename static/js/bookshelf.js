@@ -516,8 +516,7 @@ function showContextMenu(x, y, book) {
     <button class="ctx-danger" data-act="del">移出书架</button>`;
   menu.querySelector('[data-act="cat"]').addEventListener('click', () => {
     closeMenus();
-    const r = menu.getBoundingClientRect();
-    showCategoryPicker(r.left, r.bottom + 4, book);
+    showCategoryPicker(x, y, book);
   });
   menu.querySelector('[data-act="del"]').addEventListener('click', async () => {
     closeMenus();
