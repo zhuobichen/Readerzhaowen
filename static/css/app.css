@@ -748,6 +748,72 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 .cbz-scroll::-webkit-scrollbar { width: 10px; }
 .cbz-scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 6px; }
 
+/* ============================ 自动阅读 ============================ */
+.tool-btn.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.tool-btn.active svg { fill: var(--accent); fill-opacity: 0.15; }
+
+.auto-speed-popup {
+  position: fixed;
+  z-index: 999;
+  background: var(--bg-elev);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  width: 260px;
+  font-size: 13px;
+}
+.auto-speed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
+.auto-speed-close {
+  background: none; border: none; cursor: pointer;
+  font-size: 20px; color: var(--text-mute);
+  line-height: 1; padding: 0;
+}
+.auto-speed-close:hover { color: var(--text); }
+.auto-speed-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+}
+.auto-speed-body input[type="range"] {
+  flex: 1;
+  -webkit-appearance: none; appearance: none;
+  height: 5px;
+  background: var(--line-strong);
+  border-radius: 3px;
+  outline: none;
+}
+.auto-speed-body input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-elev);
+  cursor: pointer;
+}
+.auto-speed-body span {
+  font-family: var(--font-mono);
+  min-width: 28px;
+  text-align: right;
+  color: var(--accent);
+  font-weight: 600;
+}
+.auto-speed-hint {
+  padding: 0 14px 12px;
+  color: var(--text-mute);
+  font-size: 11px;
+}
+
 /* ============================ 笔记面板（侧栏浮层，不挡阅读） ============================ */
 .notes-panel {
   position: fixed;

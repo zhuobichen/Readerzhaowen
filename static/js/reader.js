@@ -20,6 +20,7 @@ const ui = {
   fit: document.getElementById('btn-fit'),
   theme: document.getElementById('btn-theme'),
   mode: document.getElementById('btn-mode'),
+  auto: document.getElementById('btn-auto'),
   toc: document.getElementById('btn-toc'),
   notes: document.getElementById('btn-notes'),
   tocPanel: document.getElementById('toc-panel'),
@@ -46,6 +47,90 @@ function showTool(groups) {
   ui.theme.hidden = !groups.theme;
   ui.mode.hidden = !groups.mode;
   ui.toc.hidden = !groups.toc;
+  // auto 按钮在卷轴模式(mode=2)或 TXT 阅读器时显示
+  updateAutoVisibility();
+}
+
+function updateAutoVisibility() {
+  const isScroll = readerMode === 2 || active?.constructor?.name === 'TXTReader';
+  ui.auto.hidden = !isScroll;
+}
+
+// ============================ 自动阅读 ============================
+let _autoReading = false;
+let _autoRAF = null;
+let _autoSpeed = parseFloat(localStorage.getItem('auto-read-speed')) || 1.5; // px/frame
+
+function getScrollContainer() {
+  if (active?._scrollMode) return ui.area;       // PDF 卷轴
+  if (active?.box) return active.box;             // TXT
+  return null;
+}
+
+function startAutoRead() {
+  if (_autoReading) return;
+  _autoReading = true;
+  ui.auto.classList.add('active');
+  ui.auto.querySelector('span').textContent = '暂停';
+  const container = getScrollContainer();
+  if (!container) return;
+
+  function step() {
+    if (!_autoReading) return;
+    const c = getScrollContainer();
+    if (!c) { stopAutoRead(); return; }
+    // 到底部自动停止
+    if (c.scrollTop + c.clientHeight >= c.scrollHeight - 2) {
+      stopAutoRead();
+      return;
+    }
+    c.scrollTop += _autoSpeed;
+    _autoRAF = requestAnimationFrame(step);
+  }
+  _autoRAF = requestAnimationFrame(step);
+}
+
+function stopAutoRead() {
+  _autoReading = false;
+  if (_autoRAF) cancelAnimationFrame(_autoRAF);
+  _autoRAF = null;
+  ui.auto.classList.remove('active');
+  ui.auto.querySelector('span').textContent = '自动';
+}
+
+function toggleAutoRead() {
+  if (_autoReading) stopAutoRead();
+  else startAutoRead();
+}
+
+function showAutoSpeedPopup() {
+  // 创建速度调节浮层
+  let popup = document.getElementById('auto-speed-popup');
+  if (popup) { popup.remove(); return; }
+  popup = document.createElement('div');
+  popup.id = 'auto-speed-popup';
+  popup.className = 'auto-speed-popup';
+  popup.innerHTML = `
+    <div class="auto-speed-header">
+      <span>自动阅读速度</span>
+      <button class="auto-speed-close">×</button>
+    </div>
+    <div class="auto-speed-body">
+      <input type="range" id="auto-speed-slider" min="0.3" max="8" step="0.1" value="${_autoSpeed}">
+      <span id="auto-speed-val">${_autoSpeed.toFixed(1)}</span>
+    </div>
+    <div class="auto-speed-hint">数值越大滚动越快</div>
+  `;
+  document.body.appendChild(popup);
+  const btnRect = ui.auto.getBoundingClientRect();
+  popup.style.right = '20px';
+  popup.style.bottom = '70px';
+  popup.querySelector('#auto-speed-slider').addEventListener('input', (e) => {
+    _autoSpeed = parseFloat(e.target.value);
+    localStorage.setItem('auto-read-speed', _autoSpeed);
+    popup.querySelector('#auto-speed-val').textContent = _autoSpeed.toFixed(1);
+  });
+  popup.querySelector('.auto-speed-close').addEventListener('click', () => popup.remove());
 }
 
 function applyMode() {
@@ -53,6 +138,8 @@ function applyMode() {
   ui.stage.dataset.mode = modeNames[readerMode];
   updateModeIcon();
   active?.setMode?.(readerMode);
+  updateAutoVisibility();
+  if (readerMode !== 2 && active?.constructor?.name !== 'TXTReader') stopAutoRead();
 }
 
 function updateModeIcon() {
@@ -140,6 +227,22 @@ function bindControls() {
     seeking = false;
   });
   document.addEventListener('keydown', onKey);
+
+  // 自动阅读: 点击切换开始/暂停, 长按(>500ms)弹出速度调节
+  let autoTimer = null;
+  let autoLongPressed = false;
+  ui.auto.addEventListener('mousedown', () => {
+    autoLongPressed = false;
+    autoTimer = setTimeout(() => {
+      autoLongPressed = true;
+      showAutoSpeedPopup();
+    }, 500);
+  });
+  ui.auto.addEventListener('mouseup', () => {
+    clearTimeout(autoTimer);
+    if (!autoLongPressed) toggleAutoRead();
+  });
+  ui.auto.addEventListener('mouseleave', () => clearTimeout(autoTimer));
 
   // 点击阅读区域切换顶部标题栏和底部工具栏同时展开/收起
   ui.area.addEventListener('click', () => {
@@ -252,6 +355,7 @@ function showError(err) {
 }
 
 function cleanup() {
+  stopAutoRead();
   flushSave();
   clearTimeout(saveTimer);
   if (active?.destroy) { try { active.destroy(); } catch {} }
