@@ -273,21 +273,6 @@ class PDFReader {
     this.total = this.pdf.numPages;
     if (this.resume?.page) this.page = Math.min(this.resume.page, this.total);
     await this.fit();
-    // 防抖 resize: 浏览器窗口变化时延迟 300ms 后重新适配
-    let resizeTimer = null;
-    window.addEventListener('resize', this._onResize = () => {
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        // 用户手动缩放后不再自动 fit，只重新渲染当前缩放
-        if (this._userZoom) {
-          if (this._scrollMode) this._scrollFit();
-          else this.render();
-        } else {
-          if (this._scrollMode) this._scrollFit();
-          else this.fit();
-        }
-      }, 300);
-    });
   }
   // ---- 卷轴模式: 连续渲染所有页面 ----
   async _enterScrollMode() {
@@ -550,12 +535,6 @@ class EPUBReader {
     await this.rendition.display(this.cfi || undefined);
     this.rendition.on('relocated', (loc) => this.onRelocate(loc));
     await this.bookObj.locations.generate(1024);
-    // 防抖 resize: 窗口变化时延迟重新适配
-    let resizeTimer = null;
-    window.addEventListener('resize', this._onResize = () => {
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => this.rendition?.resize?.(), 300);
-    });
   }
   registerThemes() {
     this.rendition.themes.register('dark', {
@@ -654,12 +633,6 @@ class TxtReader {
     await new Promise(r => requestAnimationFrame(r));
     this.box.fontSize = 17; this._scale = 1;
     this.box.addEventListener('scroll', () => this.onScroll(), { passive: true });
-    // 防抖 resize: 窗口变化时延迟更新进度
-    let resizeTimer = null;
-    window.addEventListener('resize', this._onResize = () => {
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => this.onScroll(), 300);
-    });
     if (this.resume?.progress) {
       this.box.scrollTop = this.resume.progress * (this.box.scrollHeight - this.box.clientHeight);
     }
