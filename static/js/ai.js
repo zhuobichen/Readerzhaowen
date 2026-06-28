@@ -61,6 +61,77 @@ const SVG_CLOSE = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" s
 const SVG_SEND = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>`;
 const SVG_CLEAR = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 4v5h5"/></svg>`;
 
+/** 使元素可拖拽，位置持久化到 localStorage */
+function _makeDraggable(el) {
+  const STORAGE_KEY = 'ai-fab-pos';
+  // 恢复保存的位置
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+    if (saved && typeof saved.x === 'number' && typeof saved.y === 'number') {
+      el.style.left = saved.x + 'px';
+      el.style.top = saved.y + 'px';
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+    }
+  } catch {}
+
+  let dragging = false;
+  let startX, startY, origX, origY;
+  let hasMoved = false;
+
+  el.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    hasMoved = false;
+    startX = e.clientX;
+    startY = e.clientY;
+    const rect = el.getBoundingClientRect();
+    origX = rect.left;
+    origY = rect.top;
+    el.style.transition = 'none';
+    el.style.left = origX + 'px';
+    el.style.top = origY + 'px';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved = true;
+    let nx = origX + dx;
+    let ny = origY + dy;
+    // 限制在视口内
+    const size = el.offsetWidth;
+    nx = Math.max(4, Math.min(window.innerWidth - size - 4, nx));
+    ny = Math.max(4, Math.min(window.innerHeight - size - 4, ny));
+    el.style.left = nx + 'px';
+    el.style.top = ny + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    el.style.transition = '';
+    if (hasMoved) {
+      el.classList.add('dragged');
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          x: parseInt(el.style.left),
+          y: parseInt(el.style.top),
+        }));
+      } catch {}
+    }
+  });
+
+  // 点击时如果拖拽过则不触发打开
+  el.addEventListener('click', (e) => {
+    if (hasMoved) { e.preventDefault(); e.stopPropagation(); hasMoved = false; }
+  }, true);
+}
+
 /** 构建 FAB 与对话面板 DOM */
 function buildUI() {
   // ---- 悬浮按钮 ----
@@ -71,6 +142,9 @@ function buildUI() {
   fab.setAttribute('aria-label', 'AI 助手');
   fab.innerHTML = SVG_ROBOT;
   document.body.appendChild(fab);
+
+  // ---- 拖拽 FAB ----
+  _makeDraggable(fab);
 
   // ---- 对话面板 ----
   const panel = document.createElement('div');
@@ -177,6 +251,24 @@ function openSettings() {
 
 /** 打开面板 */
 function openPanel() {
+  // 动态定位面板到 FAB 上方
+  const fabRect = el.fab.getBoundingClientRect();
+  const panelW = Math.min(380, window.innerWidth - 48);
+  let left = fabRect.right - panelW;
+  left = Math.max(12, Math.min(window.innerWidth - panelW - 12, left));
+  let bottomGap = window.innerHeight - fabRect.top + 8;
+  // 如果 FAB 在屏幕下半部, 面板放上方; 否则放下方
+  if (fabRect.top > window.innerHeight * 0.5) {
+    el.panel.style.left = left + 'px';
+    el.panel.style.right = 'auto';
+    el.panel.style.bottom = bottomGap + 'px';
+    el.panel.style.top = 'auto';
+  } else {
+    el.panel.style.left = left + 'px';
+    el.panel.style.right = 'auto';
+    el.panel.style.top = (fabRect.bottom + 8) + 'px';
+    el.panel.style.bottom = 'auto';
+  }
   el.panel.hidden = false;
   el.fab.classList.add('active');
   requestAnimationFrame(() => el.panel.classList.add('open'));

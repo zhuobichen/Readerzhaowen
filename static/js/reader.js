@@ -30,6 +30,7 @@ let saveTimer = null;
 let lightTheme = false;
 // 阅读模式: 0=horizontal(左右翻页), 1=vertical(上下分页), 2=scroll(卷轴连续滚动)
 let readerMode = parseInt(localStorage.getItem('reader-mode') || '0');
+if (isNaN(readerMode) || readerMode < 0 || readerMode > 2) readerMode = 0;
 
 function showTool(groups) {
   // groups: {zoom, fit, theme, mode}
@@ -72,7 +73,7 @@ function bindControls() {
   ui.fit.addEventListener('click', () => active?.fit?.());
   ui.theme.addEventListener('click', () => { lightTheme = !lightTheme; applyTheme(); });
   ui.mode.addEventListener('click', () => {
-    readerMode = (readerMode + 1) % 3;
+    readerMode = ((readerMode || 0) + 1) % 3;
     localStorage.setItem('reader-mode', String(readerMode));
     applyMode();
   });
@@ -193,7 +194,7 @@ function escapeHtml(s) {
 //  PDF 阅读器
 // =====================================================================
 class PDFReader {
-  constructor(book, resume) { this.book = book; this.resume = resume; this.page = 1; this.scale = 1.2; this.pdf = null; this.rendering = false; this.pending = null; this._scrollMode = false; this._scrollCanvases = new Map(); this._scrollObserver = null; }
+  constructor(book, resume) { this.book = book; this.resume = resume; this.page = 1; this.scale = 1.2; this.pdf = null; this.rendering = false; this.pending = null; this._scrollMode = false; this._scrollCanvases = new Map(); this._scrollObserver = null; this._scrollBusy = false; }
   async start() {
     showTool({ zoom: true, fit: true, theme: false, mode: true });
     this.canvas = document.createElement('canvas');
@@ -207,45 +208,59 @@ class PDFReader {
   }
   // ---- 卷轴模式: 连续渲染所有页面 ----
   async _enterScrollMode() {
+    if (this._scrollBusy) return;
+    this._scrollBusy = true;
     this._scrollMode = true;
-    // 移除单页 canvas
-    this.canvas?.remove();
-    this.canvas = null;
-    // 创建滚动容器
-    this._scrollContainer = document.createElement('div');
-    this._scrollContainer.className = 'pdf-scroll-container';
-    ui.area.appendChild(this._scrollContainer);
-    // 计算缩放
-    const basePage = await this.pdf.getPage(1);
-    const base = basePage.getViewport({ scale: 1 });
-    const avail = ui.area.clientWidth - 48;
-    this.scale = avail / base.width;
-    // 为每页创建占位 div + canvas
-    for (let i = 1; i <= this.total; i++) {
-      const wrap = document.createElement('div');
-      wrap.className = 'pdf-scroll-page';
-      wrap.dataset.page = i;
-      const canvas = document.createElement('canvas');
-      wrap.appendChild(canvas);
-      this._scrollContainer.appendChild(wrap);
-      this._scrollCanvases.set(i, { wrap, canvas, rendered: false });
+    try {
+      // 移除单页 canvas
+      this.canvas?.remove();
+      this.canvas = null;
+      // 创建滚动容器
+      this._scrollContainer = document.createElement('div');
+      this._scrollContainer.className = 'pdf-scroll-container';
+      ui.area.appendChild(this._scrollContainer);
+      // 计算缩放和页面尺寸
+      const basePage = await this.pdf.getPage(1);
+      const base = basePage.getViewport({ scale: 1 });
+      const avail = ui.area.clientWidth - 48;
+      this.scale = avail / base.width;
+      // 预计算每页高度, 用于设置占位高度
+      const pageH = base.height * this.scale;
+      // 为每页创建占位 div + canvas, 设置预设高度确保可滚动
+      for (let i = 1; i <= this.total; i++) {
+        const wrap = document.createElement('div');
+        wrap.className = 'pdf-scroll-page';
+        wrap.dataset.page = i;
+        wrap.style.minHeight = Math.round(pageH) + 'px';
+        const canvas = document.createElement('canvas');
+        canvas.style.display = 'block';
+        canvas.style.margin = '0 auto';
+        wrap.appendChild(canvas);
+        this._scrollContainer.appendChild(wrap);
+        this._scrollCanvases.set(i, { wrap, canvas, rendered: false });
+      }
+      // IntersectionObserver 懒渲染
+      this._scrollObserver = new IntersectionObserver((entries) => {
+        entries.forEach(e => {
+          if (e.isIntersecting) {
+            const pg = parseInt(e.target.dataset.page);
+            this._renderScrollPage(pg);
+          }
+        });
+      }, { root: ui.area, rootMargin: '300px 0px' });
+      this._scrollCanvases.forEach(({ wrap }) => this._scrollObserver.observe(wrap));
+      // 滚动到当前页
+      const target = this._scrollCanvases.get(this.page);
+      if (target) target.wrap.scrollIntoView();
+      // 监听滚动更新进度 — ui.area 是实际滚动元素
+      ui.area.addEventListener('scroll', this._onScrollView = () => this._onScrollUpdate());
+    } catch (e) {
+      console.error('enterScrollMode failed:', e);
+      this._exitScrollMode();
+      await this.render();
+    } finally {
+      this._scrollBusy = false;
     }
-    // IntersectionObserver 懒渲染
-    this._scrollObserver = new IntersectionObserver((entries) => {
-      entries.forEach(e => {
-        if (e.isIntersecting) {
-          const pg = parseInt(e.target.dataset.page);
-          this._renderScrollPage(pg);
-        }
-      });
-    }, { root: ui.area, rootMargin: '200px 0px' });
-    this._scrollCanvases.forEach(({ wrap }) => this._scrollObserver.observe(wrap));
-    // 滚动到当前页
-    const target = this._scrollCanvases.get(this.page);
-    if (target) target.wrap.scrollIntoView();
-    // 监听滚动更新进度
-    this._scrollContainer.addEventListener('scroll', this._onScrollView = () => this._onScrollUpdate());
-    this._scrollCanvases.forEach(({ wrap }) => this._scrollObserver.observe(wrap));
   }
   async _renderScrollPage(pageNum) {
     const entry = this._scrollCanvases.get(pageNum);
@@ -291,8 +306,8 @@ class PDFReader {
     this._scrollMode = false;
     this._scrollObserver?.disconnect();
     this._scrollObserver = null;
+    if (this._onScrollView) { ui.area.removeEventListener('scroll', this._onScrollView); this._onScrollView = null; }
     if (this._scrollContainer) {
-      this._scrollContainer.removeEventListener('scroll', this._onScrollView);
       this._scrollContainer.remove();
       this._scrollContainer = null;
     }
@@ -357,6 +372,7 @@ class PDFReader {
     }
     if (mode !== 2 && this._scrollMode) {
       this._exitScrollMode();
+      this.render();
     }
     if (mode === 1) {
       // 垂直模式：滚轮在页面边界时翻页
@@ -379,12 +395,11 @@ class PDFReader {
       };
       ui.area.addEventListener('wheel', this._onWheel, { passive: false });
     } else if (mode === 0 && this.canvas) {
-      // 水平模式: 重新渲染
       this.render();
     }
   }
   save(frac) { API.saveProgress(this.book.id, { progress: frac, page: this.page, total: this.total }); }
-  destroy() { window.removeEventListener('resize', this._onResize); if (this._onWheel) ui.area.removeEventListener('wheel', this._onWheel); if (this._wheelLock) clearTimeout(this._wheelLock); this._scrollObserver?.disconnect(); if (this._scrollContainer) this._scrollContainer.removeEventListener('scroll', this._onScrollView); try { this.pdf?.destroy(); } catch {} }
+  destroy() { window.removeEventListener('resize', this._onResize); if (this._onWheel) ui.area.removeEventListener('wheel', this._onWheel); if (this._wheelLock) clearTimeout(this._wheelLock); this._scrollObserver?.disconnect(); if (this._onScrollView) ui.area.removeEventListener('scroll', this._onScrollView); try { this.pdf?.destroy(); } catch {} }
 }
 
 // =====================================================================

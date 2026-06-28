@@ -351,10 +351,10 @@ def restore_from_trash(book_id):
     if book_id not in trash:
         return None, "not in trash"
     info = trash.pop(book_id)
-    # 恢复到 books
+    # 恢复到 books (用原始文件名作 key, 与 scan_books 返回的 id 一致)
     books = lib.setdefault("books", {})
     books[book_id] = {
-        "progress": 0,
+        "progress": info.get("progress", 0),
         "category": info.get("originalCategory", ""),
     }
     # 保留原有元数据 (标题/作者/封面等) 若存在则不覆盖
@@ -2030,18 +2030,23 @@ class Handler(BaseHTTPRequestHandler):
         full = book_path(book_id)
         if not full:
             return self._json(404, {"error": "book not found"})
+        # book_id 来自 URL 路径, 可能是 URL 编码的; 统一解码为原始文件名
+        decoded = urllib.parse.unquote(book_id)
         lib = load_library()
-        meta = lib.get("books", {}).get(book_id, {})
-        title = meta.get("title", book_id)
-        # 移入回收站, 不删除文件
+        books = lib.get("books", {})
+        # library.json 中 key 可能是原始文件名或 URL 编码, 两种都尝试
+        meta = books.get(decoded) or books.get(book_id) or {}
+        title = meta.get("title", decoded)
+        # 移入回收站, 不删除文件; trash key 用原始文件名 (与 scan_books 返回的 id 一致)
         trash = lib.setdefault("trash", {})
-        trash[book_id] = {
+        trash[decoded] = {
             "title": title,
             "deletedAt": int(time.time()),
             "originalCategory": meta.get("category", ""),
             "path": full,
         }
-        lib.get("books", {}).pop(book_id, None)
+        books.pop(decoded, None)
+        books.pop(book_id, None)
         save_library(lib)
         self._json(200, {"ok": True, "title": title, "message": "已移入回收站"})
 

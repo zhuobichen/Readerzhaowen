@@ -543,8 +543,8 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 /* ============================ 卷轴模式 ============================ */
 .reader-stage[data-mode="scroll"] .page-nav { display: none; }
 .reader-stage[data-mode="scroll"] .reader-area {
-  align-items: center;
-  justify-content: center;
+  display: block;
+  overflow-y: auto;
 }
 .pdf-scroll-container {
   width: 100%;

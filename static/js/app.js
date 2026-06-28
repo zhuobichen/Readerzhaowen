@@ -179,7 +179,7 @@ async function loadTrashList() {
     listEl.querySelectorAll('[data-act="permanent"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = btn.dataset.id;
-        if (!confirm('永久删除后无法恢复，确定吗？')) return;
+        if (!await confirmModal('永久删除', '永久删除后无法恢复，确定吗？', { confirmText: '永久删除', danger: true })) return;
         try {
           await API.deleteBookPermanent(id);
           loadTrashList();
@@ -200,6 +200,38 @@ async function loadTrashList() {
 
 function escapeHtmlSafe(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+// ---- 通用确认对话框 (替代原生 confirm) ----
+export function confirmModal(title, message, { confirmText = '确定', cancelText = '取消', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal-box" style="width:380px;">
+        <div class="modal-header">
+          <h3>${escapeHtmlSafe(title)}</h3>
+        </div>
+        <div class="modal-body" style="padding:20px;">
+          <p style="font-size:14px;line-height:1.6;color:var(--text-dim);margin:0;">${escapeHtmlSafe(message)}</p>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;padding:0 20px 16px;">
+          <button class="btn-sm" data-act="cancel" style="min-width:64px;">${escapeHtmlSafe(cancelText)}</button>
+          <button class="btn-sm ${danger ? 'btn-danger' : ''}" data-act="ok" style="min-width:72px;">${escapeHtmlSafe(confirmText)}</button>
+        </div>
+      </div>`;
+    const close = (result) => { overlay.remove(); resolve(result); };
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) close(false);
+      if (e.target.dataset.act === 'cancel') close(false);
+      if (e.target.dataset.act === 'ok') close(true);
+    });
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { close(false); document.removeEventListener('keydown', esc); }
+    });
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-act="ok"]').focus();
+  });
 }
 
 function bind() {
@@ -225,7 +257,6 @@ function bind() {
 
   // 拖拽导入：仅书架视图+仅文件类型才触发
   let dragCounter = 0;
-  let dropOverlay = null;
   function isFileDrag(e) {
     return e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files');
   }
@@ -233,32 +264,10 @@ function bind() {
     const shelf = document.getElementById('view-shelf');
     return shelf && !shelf.hidden;
   }
-  window.addEventListener('dragenter', (e) => {
-    if (!isFileDrag(e) || !isShelfView()) return;
-    e.preventDefault();
-    dragCounter++;
-    if (!dropOverlay) {
-      dropOverlay = document.createElement('div');
-      dropOverlay.className = 'drop-overlay';
-      dropOverlay.innerHTML = '<div class="drop-inner"><svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg><p>松手导入书籍</p></div>';
-      document.body.appendChild(dropOverlay);
-    }
-  });
   window.addEventListener('dragover', (e) => { if (isFileDrag(e) && isShelfView()) e.preventDefault(); });
-  window.addEventListener('dragleave', () => {
-    dragCounter--;
-    if (dragCounter <= 0) {
-      dragCounter = 0;
-      dropOverlay?.remove();
-      dropOverlay = null;
-    }
-  });
   window.addEventListener('drop', (e) => {
     if (!isFileDrag(e) || !isShelfView()) return;
     e.preventDefault();
-    dragCounter = 0;
-    dropOverlay?.remove();
-    dropOverlay = null;
     const files = [...(e.dataTransfer?.files || [])];
     const valid = files.filter(f => /\.(pdf|epub|txt|mobi|azw3|fb2|cbz|cbr|docx)$/i.test(f.name));
     if (valid.length) handleUpload(valid);

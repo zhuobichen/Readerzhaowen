@@ -1,6 +1,7 @@
 // bookshelf.js — 书架视图：网格、懒加载封面、搜索/筛选/排序
 import API from './api.js';
 import { CoverStore, makePlaceholderCover } from './store.js';
+import { confirmModal } from './app.js';
 
 let allBooks = [];
 let categories = [];            // [{name, count}]
@@ -301,7 +302,7 @@ function showTrashBin(show) {
         closeMenus();
         const book = allBooks.find(b => b.id === bookId);
         const title = book ? (book.title || book.name) : bookId;
-        if (!confirm(`确定将《${title}》移入回收站？\n30天内可恢复，超过30天将永久删除。`)) return;
+        if (!await confirmModal('移入回收站', `确定将《${title}》移入回收站？\n30天内可恢复，超过30天将永久删除。`, { confirmText: '移入回收站', danger: true })) return;
         try {
           await API.deleteBook(bookId);
           load();
@@ -489,7 +490,7 @@ function showContextMenu(x, y, book) {
   });
   menu.querySelector('[data-act="del"]').addEventListener('click', async () => {
     closeMenus();
-    if (!confirm(`确定将《${book.title || book.name}》移出书架？\n30天内可在回收站恢复。`)) return;
+    if (!await confirmModal('移出书架', `确定将《${book.title || book.name}》移出书架？\n30天内可在回收站恢复。`, { confirmText: '移出书架', danger: true })) return;
     try {
       await API.deleteBook(book.id);
       load();
