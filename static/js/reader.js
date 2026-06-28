@@ -420,8 +420,18 @@ class PDFReader {
     void this.canvas.offsetWidth; // 触发重排
     this.canvas.classList.add(dir === 'forward' ? 'flip-anim' : 'flip-back');
   }
-  seek(f) { this.page = Math.max(1, Math.min(this.total, Math.round(f * (this.total - 1)) + 1)); this.render(); }
-  seekByPage(page) { this.page = Math.max(1, Math.min(this.total, page)); this.render(); }
+  seek(f) { this.page = Math.max(1, Math.min(this.total, Math.round(f * (this.total - 1)) + 1)); this._afterSeek(); }
+  seekByPage(page) { this.page = Math.max(1, Math.min(this.total, page)); this._afterSeek(); }
+  _afterSeek() {
+    if (this._scrollMode) {
+      // 卷轴模式: 滚动到目标页
+      const entry = this._scrollCanvases.get(this.page);
+      if (entry) entry.wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      updateProgress((this.page - 1) / Math.max(1, this.total - 1), `${this.page} / ${this.total}`);
+    } else {
+      this.render();
+    }
+  }
   getLocation() { return { page: this.page, progress: (this.page - 1) / Math.max(1, this.total - 1), label: `第${this.page}页` }; }
   async getChapters() {
     try {
