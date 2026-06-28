@@ -49,18 +49,22 @@ function toggle() {
   else close();
 }
 
-function open() {
-  el.panel.hidden = false;
-  el.panel.classList.add('open');
-  setTimeout(() => el.input.focus(), 50);
-}
-
 function close() {
   el.panel.hidden = true;
   el.panel.classList.remove('open');
   editingId = null;
   el.input.value = '';
   el.save.textContent = '保存笔记';
+  // 记住用户关闭了笔记面板，下次不再自动展开
+  localStorage.setItem('notes-auto-open', 'false');
+}
+
+function open() {
+  el.panel.hidden = false;
+  el.panel.classList.add('open');
+  // 用户主动打开，恢复自动展开
+  localStorage.setItem('notes-auto-open', 'true');
+  setTimeout(() => el.input.focus(), 50);
 }
 
 async function save() {

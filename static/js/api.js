@@ -167,6 +167,28 @@ const API = {
     return await r.json();
   },
 
+  // ---- 书籍排序 ----
+  async reorderBooks(id1, id2) {
+    try {
+      const r = await fetch('/api/books/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id1, id2 }),
+      });
+      if (!r.ok) throw new Error('排序失败');
+      return await r.json();
+    } catch (e) { throw e; }
+  },
+
+  // ---- 所有笔记聚合 ----
+  async getAllNotes() {
+    try {
+      const r = await fetch('/api/notes/all');
+      if (!r.ok) return [];
+      return (await r.json()).notes || [];
+    } catch { return []; }
+  },
+
   // ---- AI ----
   async getAIConfig() {
     try {

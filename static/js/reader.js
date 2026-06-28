@@ -19,7 +19,12 @@ const ui = {
   fit: document.getElementById('btn-fit'),
   theme: document.getElementById('btn-theme'),
   mode: document.getElementById('btn-mode'),
+  toc: document.getElementById('btn-toc'),
   notes: document.getElementById('btn-notes'),
+  tocPanel: document.getElementById('toc-panel'),
+  tocList: document.getElementById('toc-list'),
+  tocEmpty: document.getElementById('toc-empty'),
+  tocBookName: document.getElementById('toc-book-name'),
   zoomLvl: document.getElementById('zoom-level'),
   back: document.getElementById('reader-back'),
 };
@@ -33,11 +38,12 @@ let readerMode = parseInt(localStorage.getItem('reader-mode') || '0');
 if (isNaN(readerMode) || readerMode < 0 || readerMode > 2) readerMode = 0;
 
 function showTool(groups) {
-  // groups: {zoom, fit, theme, mode}
+  // groups: {zoom, fit, theme, mode, toc}
   ui.zIn.hidden = ui.zOut.hidden = ui.zoomLvl.hidden = !groups.zoom;
   ui.fit.hidden = !groups.fit;
   ui.theme.hidden = !groups.theme;
   ui.mode.hidden = !groups.mode;
+  ui.toc.hidden = !groups.toc;
 }
 
 function applyMode() {
@@ -65,6 +71,49 @@ function updateModeIcon() {
   }
 }
 
+// ---- 目录面板 ----
+let _tocChapters = [];
+async function toggleTOC(force) {
+  const show = force !== undefined ? force : ui.tocPanel.hidden;
+  if (show) {
+    ui.tocPanel.hidden = false;
+    ui.tocPanel.classList.add('open');
+    if (!_tocChapters.length && active?.getChapters) {
+      ui.tocList.innerHTML = '<div style="padding:16px;color:var(--text-dim);">加载中…</div>';
+      _tocChapters = await active.getChapters();
+      renderTOC();
+    }
+  } else {
+    ui.tocPanel.classList.remove('open');
+    setTimeout(() => { ui.tocPanel.hidden = true; }, 250);
+  }
+}
+function renderTOC() {
+  if (!_tocChapters.length) {
+    ui.tocEmpty.hidden = false;
+    ui.tocList.innerHTML = '';
+    return;
+  }
+  ui.tocEmpty.hidden = true;
+  const html = _tocChapters.flatMap(ch => renderTOCItem(ch, false).concat((ch.children || []).map(sub => renderTOCItem(sub, true)))).join('');
+  ui.tocList.innerHTML = html;
+  ui.tocList.querySelectorAll('.toc-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const page = parseInt(el.dataset.page);
+      const href = el.dataset.href;
+      if (href && active?.seekByHref) active.seekByHref(href);
+      else if (page > 0) active?.seekByPage?.(page);
+      else if (el.dataset.progress) active?.seek?.(parseFloat(el.dataset.progress));
+    });
+  });
+}
+function renderTOCItem(ch, isSub) {
+  const cls = isSub ? 'toc-item sub' : 'toc-item';
+  const pageLabel = ch.page ? `<span class="toc-page">P${ch.page}</span>` : '';
+  const dataAttrs = ch.href ? `data-href="${ch.href}"` : (ch.page ? `data-page="${ch.page}"` : `data-progress="${ch.progress || 0}"`);
+  return `<div class="${cls}" ${dataAttrs}>${escapeHtml(ch.title)}${pageLabel}</div>`;
+}
+
 function bindControls() {
   ui.prev.addEventListener('click', () => active?.prev());
   ui.next.addEventListener('click', () => active?.next());
@@ -77,6 +126,8 @@ function bindControls() {
     localStorage.setItem('reader-mode', String(readerMode));
     applyMode();
   });
+  ui.toc.addEventListener('click', () => toggleTOC());
+  document.getElementById('toc-close').addEventListener('click', () => toggleTOC(false));
   ui.slider.addEventListener('input', () => {
     seeking = true;
     ui.pct.textContent = Math.round(ui.slider.value) + '%';
@@ -136,7 +187,16 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) flush
 
 // ----------------------------- 入口 -----------------------------
 async function open(book) {
+  // 在 cleanup 之前保存笔记面板偏好（cleanup 会调用 Notes.close 重置偏好）
+  const _notesAutoOpen = localStorage.getItem('notes-auto-open') !== 'false';
   cleanup();
+  // 恢复偏好（被 cleanup 中的 Notes.close 覆盖了）
+  localStorage.setItem('notes-auto-open', _notesAutoOpen ? 'true' : 'false');
+  // 重置目录面板
+  _tocChapters = [];
+  ui.tocPanel.classList.remove('open');
+  ui.tocPanel.hidden = true;
+  ui.tocBookName.textContent = book.title || book.name;
   ui.title.textContent = book.title || book.name;
   ui.fmt.textContent = book.format.toUpperCase();
   ui.area.innerHTML = '';
@@ -147,7 +207,7 @@ async function open(book) {
   const saved = await API.getProgress(book.id);
   const resume = saved?.progress ? saved : null;
 
-  // 加载笔记（每本书隔离）
+  // 加载笔记（每本书隔离）并自动展开
   Notes.load(
     book.id,
     book.title || book.name,
@@ -156,7 +216,10 @@ async function open(book) {
       if (progress > 0) active?.seek?.(progress);
       else if (page) active?.seekByPage?.(page);
     },
-  );
+  ).then(() => {
+    // 自动展开笔记面板（如果用户之前没关过）
+    if (localStorage.getItem('notes-auto-open') !== 'false') Notes.open();
+  });
 
   try {
     if (book.format === 'pdf') active = new PDFReader(book, resume);
@@ -196,7 +259,7 @@ function escapeHtml(s) {
 class PDFReader {
   constructor(book, resume) { this.book = book; this.resume = resume; this.page = 1; this.scale = 1.2; this.pdf = null; this.rendering = false; this.pending = null; this._scrollMode = false; this._scrollCanvases = new Map(); this._scrollObserver = null; this._scrollBusy = false; }
   async start() {
-    showTool({ zoom: true, fit: true, theme: false, mode: true });
+    showTool({ zoom: true, fit: true, theme: false, mode: true, toc: true });
     this.canvas = document.createElement('canvas');
     this.canvas.id = 'pdf-canvas';
     ui.area.appendChild(this.canvas);
@@ -360,6 +423,32 @@ class PDFReader {
   seek(f) { this.page = Math.max(1, Math.min(this.total, Math.round(f * (this.total - 1)) + 1)); this.render(); }
   seekByPage(page) { this.page = Math.max(1, Math.min(this.total, page)); this.render(); }
   getLocation() { return { page: this.page, progress: (this.page - 1) / Math.max(1, this.total - 1), label: `第${this.page}页` }; }
+  async getChapters() {
+    try {
+      const outline = await this.pdf.getOutline();
+      if (!outline || !outline.length) return [];
+      return await this._resolveOutline(outline);
+    } catch (e) { return []; }
+  }
+  async _resolveOutline(items) {
+    const result = [];
+    for (const item of items) {
+      let pageNum = 1;
+      try {
+        const dest = typeof item.dest === 'string' ? await this.pdf.getDestination(item.dest) : item.dest;
+        if (dest && dest[0]) {
+          const idx = await this.pdf.getPageIndex(dest[0]);
+          pageNum = idx + 1;
+        }
+      } catch {}
+      const chapter = { title: item.title, page: pageNum };
+      if (item.items && item.items.length) {
+        chapter.children = await this._resolveOutline(item.items);
+      }
+      result.push(chapter);
+    }
+    return result;
+  }
   setMode(mode) {
     // mode: 0=horizontal, 1=vertical, 2=scroll
     // 清理旧的 wheel 监听
@@ -409,7 +498,7 @@ class EPUBReader {
   static async create(book, resume) { return new EPUBReader(book, resume); }
   constructor(book, resume) { this.book = book; this.resume = resume; this.cfi = resume?.cfi || null; this.currentProgress = 0; }
   async start() {
-    showTool({ zoom: true, fit: false, theme: true, mode: true });
+    showTool({ zoom: true, fit: false, theme: true, mode: true, toc: true });
     this._fontScale = 1;
     this.host = document.createElement('div');
     this.host.id = 'epub-viewer';
@@ -480,8 +569,21 @@ class EPUBReader {
     this.cfi = cfi; this.rendition.display(cfi);
   }
   seekByPage(page) { /* EPUB 用 CFI 定位，走 seek(progress) 路径 */ }
+  seekByHref(href) { if (this.rendition) { this.cfi = href; this.rendition.display(href); } }
   setTheme(t) { this.rendition?.themes.select(t); }
   getLocation() { return { page: 0, progress: this.currentProgress, label: `${Math.round(this.currentProgress * 100)}%` }; }
+  async getChapters() {
+    try {
+      const nav = await this.bookObj.navigation.get();
+      if (!nav || !nav.toc) return [];
+      return nav.toc.map(item => ({
+        title: item.label.trim(),
+        href: item.href,
+        progress: 0,
+        children: item.subitems ? item.subitems.map(sub => ({ title: sub.label.trim(), href: sub.href, progress: 0 })) : [],
+      }));
+    } catch (e) { return []; }
+  }
   setMode(mode) {
     if (!this.rendition) return;
     // mode: 0=horizontal(paginated), 1/2=vertical/scroll(scrolled)
@@ -629,4 +731,4 @@ function decodeText(buf) {
   return utf8;
 }
 
-export const Reader = { open, cleanup, init: bindControls, applyTheme, back: () => ui.back, getLocation: () => active?.getLocation?.() || { page: 0, progress: 0, label: '' } };
+export const Reader = { open, cleanup, init: bindControls, applyTheme, back: () => ui.back, getLocation: () => active?.getLocation?.() || { page: 0, progress: 0, label: '' }, get active() { return active; }, seekByPage: (p) => active?.seekByPage?.(p), seek: (f) => active?.seek?.(f) };

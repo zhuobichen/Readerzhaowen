@@ -1803,6 +1803,10 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["api", "trash", "empty"]:
             return self._api_trash_empty()
 
+        # /api/books/reorder  -> 交换两本书的位置
+        if parts == ["api", "books", "reorder"]:
+            return self._api_reorder_books()
+
         if len(parts) == 2 and parts[0] == "api" and parts[1] == "library":
             return self._api_save_library()
 
@@ -1935,6 +1939,10 @@ class Handler(BaseHTTPRequestHandler):
         # /api/trash  -> 回收站列表
         if parts == ["api", "trash"]:
             return self._api_trash_list()
+
+        # /api/notes/all  -> 所有书的笔记聚合
+        if parts == ["api", "notes", "all"]:
+            return self._api_all_notes()
 
         # /api/books/<id>/file
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "books" and parts[3] == "file":
@@ -2523,6 +2531,68 @@ class Handler(BaseHTTPRequestHandler):
         meta["notes"].sort(key=lambda n: n.get("createdAt", 0))
         save_library(lib)
         self._json(200, {"ok": True, "notes": meta.get("notes", [])})
+
+    def _api_all_notes(self):
+        """聚合所有书的笔记, 返回 [{bookId, bookTitle, bookFormat, category, note}]"""
+        lib = load_library()
+        books_meta = lib.get("books", {})
+        # 扫描书架上的所有书
+        all_books = scan_books()
+        result = []
+        for b in all_books:
+            bid = b["id"]
+            meta = books_meta.get(bid, {})
+            notes = meta.get("notes", [])
+            for n in notes:
+                result.append({
+                    "id": n.get("id"),
+                    "content": n.get("content", ""),
+                    "page": n.get("page", 0),
+                    "progress": n.get("progress", 0),
+                    "createdAt": n.get("createdAt", 0),
+                    "updatedAt": n.get("updatedAt", 0),
+                    "bookId": bid,
+                    "bookTitle": meta.get("title") or b.get("title") or b.get("name") or bid,
+                    "bookFormat": b.get("format", ""),
+                    "category": meta.get("category", ""),
+                })
+        # 按更新时间倒序
+        result.sort(key=lambda x: x.get("updatedAt", 0), reverse=True)
+        return self._json(200, {"notes": result})
+
+    def _api_reorder_books(self):
+        """交换两本书的自定义排序位置"""
+        try:
+            payload = json.loads(self._read_body().decode("utf-8"))
+        except Exception:
+            return self._json(400, {"error": "bad json"})
+        id1 = payload.get("id1")
+        id2 = payload.get("id2")
+        if not id1 or not id2:
+            return self._json(400, {"error": "id1 and id2 required"})
+        lib = load_library()
+        books = lib.setdefault("books", {})
+        meta1 = books.setdefault(id1, {})
+        meta2 = books.setdefault(id2, {})
+        pos1 = meta1.get("position")
+        pos2 = meta2.get("position")
+        # 如果都没有 position, 初始化为当前文件顺序
+        if pos1 is None and pos2 is None:
+            all_books = scan_books()
+            for i, b in enumerate(all_books):
+                bid = b["id"]
+                books.setdefault(bid, {})["position"] = i
+            pos1 = books[id1].get("position")
+            pos2 = books[id2].get("position")
+        elif pos1 is None:
+            pos1 = pos2 + 1 if pos2 is not None else 0
+        elif pos2 is None:
+            pos2 = pos1 + 1 if pos1 is not None else 0
+        # 交换
+        meta1["position"] = pos2
+        meta2["position"] = pos1
+        save_library(lib)
+        return self._json(200, {"ok": True})
 
     def log_message(self, *args):
         pass

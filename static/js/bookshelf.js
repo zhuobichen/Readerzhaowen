@@ -278,6 +278,7 @@ function filtered() {
   const s = el.sort.value;
   if (s === 'title') list.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh'));
   else if (s === 'added') list.sort((a, b) => b.mtime - a.mtime);
+  else if (s === 'custom') list.sort((a, b) => (a.position ?? 99999) - (b.position ?? 99999) || b.mtime - a.mtime);
   else list.sort((a, b) => (b.lastRead || 0) - (a.lastRead || 0) || b.mtime - a.mtime);
   return list;
 }
@@ -351,7 +352,7 @@ function render() {
     card.querySelector('.cover-placeholder').style.background = `linear-gradient(150deg, ${a} 0%, ${c} 100%)`;
     card.addEventListener('click', () => openBook(b));
     card.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e.clientX, e.clientY, b); });
-    // 拖拽分类: 书籍卡片可拖到左侧分类项
+    // 拖拽分类: 书籍卡片可拖到左侧分类项; 自定义排序模式下可拖到另一本书上交换位置
     card.draggable = true;
     card.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/plain', b.id);
@@ -359,8 +360,38 @@ function render() {
       card.classList.add('dragging');
       showTrashBin(true);
     });
+    card.addEventListener('dragover', (e) => {
+      // 自定义排序模式下, 允许拖到另一本书上
+      if (el.sort.value === 'custom' && !card.classList.contains('dragging')) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        card.classList.add('drag-over');
+      }
+    });
+    card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+    card.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      card.classList.remove('drag-over');
+      const draggedId = e.dataTransfer.getData('text/plain');
+      if (!draggedId || draggedId === b.id) return;
+      if (el.sort.value !== 'custom') return;
+      // 交换位置
+      try {
+        await API.reorderBooks(draggedId, b.id);
+        // 更新本地 position
+        const a = allBooks.find(x => x.id === draggedId);
+        const c = allBooks.find(x => x.id === b.id);
+        if (a && c) {
+          const tmp = a.position;
+          a.position = c.position;
+          c.position = tmp;
+        }
+        render();
+      } catch (err) { console.error('reorder failed:', err); }
+    });
     card.addEventListener('dragend', () => {
       card.classList.remove('dragging');
+      card.classList.remove('drag-over');
       showTrashBin(false);
     });
     // 分类标签点击 -> 弹出分类选择

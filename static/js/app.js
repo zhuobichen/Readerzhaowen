@@ -244,6 +244,9 @@ function bind() {
   Reader.back().addEventListener('click', () => { location.hash = '#/'; });
   window.addEventListener('hashchange', route);
 
+  // 笔记中心
+  initNotesCenter();
+
   // 文件上传
   const fileInput = document.getElementById('file-input');
   const btnUpload = document.getElementById('btn-upload');
@@ -275,5 +278,62 @@ function bind() {
 }
 
 bind();
+
+// ---- 笔记中心 ----
+function initNotesCenter() {
+  const btn = document.getElementById('btn-notes-center');
+  const modal = document.getElementById('notes-center-modal');
+  const closeBtn = document.getElementById('notes-center-close');
+  const listEl = document.getElementById('notes-center-list');
+  const emptyEl = document.getElementById('notes-center-empty');
+  if (!btn || !modal) return;
+
+  async function openModal() {
+    modal.hidden = false;
+    listEl.innerHTML = '<div style="padding:20px;color:var(--text-dim);text-align:center;">加载中…</div>';
+    emptyEl.hidden = true;
+    try {
+      const notes = await API.getAllNotes();
+      if (!notes.length) {
+        listEl.innerHTML = '';
+        emptyEl.hidden = false;
+        return;
+      }
+      listEl.innerHTML = notes.map(n => {
+        const date = new Date(n.updatedAt || n.createdAt).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+        const locLabel = n.page ? `第${n.page}页` : `${Math.round((n.progress || 0) * 100)}%`;
+        return `<div class="nc-note-card" data-book-id="${escapeHtmlSafe(n.bookId)}" data-page="${n.page || 0}" data-progress="${n.progress || 0}">
+          <div class="nc-note-meta">
+            <span class="nc-book-title">${escapeHtmlSafe(n.bookTitle)}</span>
+            <span class="nc-note-loc">${escapeHtmlSafe(locLabel)} · ${date}</span>
+          </div>
+          <div class="nc-note-content">${escapeHtmlSafe(n.content)}</div>
+        </div>`;
+      }).join('');
+      listEl.querySelectorAll('.nc-note-card').forEach(card => {
+        card.addEventListener('click', () => {
+          const bookId = card.dataset.bookId;
+          const page = parseInt(card.dataset.page);
+          const progress = parseFloat(card.dataset.progress);
+          modal.hidden = true;
+          // 跳转到对应书和位置
+          location.hash = `#/book/${encodeURIComponent(bookId)}`;
+          // 延迟后定位到笔记位置
+          setTimeout(() => {
+            if (progress > 0) Reader.seek(progress);
+            else if (page > 0) Reader.seekByPage(page);
+          }, 1500);
+        });
+      });
+    } catch (e) {
+      listEl.innerHTML = `<div style="padding:20px;color:var(--text-dim);">加载失败: ${escapeHtmlSafe(e.message)}</div>`;
+    }
+  }
+
+  btn.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', () => { modal.hidden = true; });
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.hidden = true; });
+}
+
 initBookshelf();
 route();
