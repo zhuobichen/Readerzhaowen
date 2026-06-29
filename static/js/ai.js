@@ -109,6 +109,8 @@ function _makeDraggable(el) {
     ny = Math.max(4, Math.min(window.innerHeight - size - 4, ny));
     el.style.left = nx + 'px';
     el.style.top = ny + 'px';
+    // 拖拽时同步移动面板（如果面板已打开）
+    syncPanelToFAB();
   });
 
   document.addEventListener('mouseup', () => {
@@ -249,19 +251,17 @@ function openSettings() {
   el.settingsModal.hidden = false;
 }
 
-/** 打开面板 */
-function openPanel() {
-  // 动态定位面板到 FAB 上方
+/** 根据FAB当前位置定位面板 */
+function syncPanelToFAB() {
+  if (!el.panel || el.panel.hidden || !el.panel.classList.contains('open')) return;
   const fabRect = el.fab.getBoundingClientRect();
   const panelW = Math.min(380, window.innerWidth - 48);
   let left = fabRect.right - panelW;
   left = Math.max(12, Math.min(window.innerWidth - panelW - 12, left));
-  let bottomGap = window.innerHeight - fabRect.top + 8;
-  // 如果 FAB 在屏幕下半部, 面板放上方; 否则放下方
   if (fabRect.top > window.innerHeight * 0.5) {
     el.panel.style.left = left + 'px';
     el.panel.style.right = 'auto';
-    el.panel.style.bottom = bottomGap + 'px';
+    el.panel.style.bottom = (window.innerHeight - fabRect.top + 8) + 'px';
     el.panel.style.top = 'auto';
   } else {
     el.panel.style.left = left + 'px';
@@ -269,6 +269,11 @@ function openPanel() {
     el.panel.style.top = (fabRect.bottom + 8) + 'px';
     el.panel.style.bottom = 'auto';
   }
+}
+
+/** 打开面板 */
+function openPanel() {
+  syncPanelToFAB();
   el.panel.hidden = false;
   el.fab.classList.add('active');
   requestAnimationFrame(() => el.panel.classList.add('open'));

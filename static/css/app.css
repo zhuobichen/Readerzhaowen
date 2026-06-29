@@ -86,6 +86,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 
 /* ============================ 顶栏（书架） ============================ */
 .topbar {
+  zoom: var(--ui-zoom, 1);
   height: var(--topbar-h);
   flex: 0 0 var(--topbar-h);
   display: flex;
@@ -759,6 +760,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 
 .auto-speed-popup {
   position: fixed;
+  zoom: var(--ui-zoom, 1);
   z-index: 999;
   background: var(--bg-elev);
   border: 1px solid var(--line-strong);
@@ -819,6 +821,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 /* ============================ 笔记面板（侧栏浮层，不挡阅读） ============================ */
 .notes-panel {
   position: fixed;
+  zoom: var(--ui-zoom, 1);
   top: var(--readerbar-h);
   right: 0;
   bottom: var(--readerfoot-h);
@@ -973,7 +976,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 }
 
 /* ============================ 目录面板 ============================ */
-.toc-panel { width: 280px; }
+.toc-panel { width: 280px; zoom: var(--ui-zoom, 1); }
 .toc-list { flex: 1; overflow-y: auto; padding: 4px 0; }
 .toc-item {
   padding: 8px 16px;
@@ -1099,6 +1102,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 /* 右键菜单 */
 .ctx-menu {
   position: fixed;
+  zoom: var(--ui-zoom, 1);
   z-index: 600;
   background: var(--bg-elev);
   border: 1px solid var(--line-strong);
@@ -1126,6 +1130,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 /* 分类选择下拉 */
 .cat-picker {
   position: fixed;
+  zoom: var(--ui-zoom, 1);
   z-index: 600;
   background: var(--bg-elev);
   border: 1px solid var(--line-strong);
@@ -1152,6 +1157,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 /* ============================ AI 悬浮按钮 ============================ */
 .ai-fab {
   position: fixed;
+  zoom: var(--ui-zoom, 1);
   bottom: 24px; right: 24px;
   width: 52px; height: 52px;
   border-radius: 50%;
@@ -1170,6 +1176,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 /* ============================ AI 对话面板 ============================ */
 .ai-panel {
   position: fixed;
+  zoom: var(--ui-zoom, 1);
   bottom: 88px; right: 24px;
   width: 380px;
   max-width: calc(100vw - 48px);
@@ -1290,6 +1297,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 .modal-overlay {
   position: fixed;
   inset: 0;
+  zoom: var(--ui-zoom, 1);
   background: rgba(0,0,0,0.5);
   z-index: 400;
   display: grid;

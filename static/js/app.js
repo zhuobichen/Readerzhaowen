@@ -11,6 +11,19 @@ if (window.pdfjsLib) {
   pdfjsLib.disableWorker = false;
 }
 
+// 浏览器缩放时, UI 元素反向缩放保持固定大小
+const _baseDPR = window.devicePixelRatio;
+function adjustUIZoom() {
+  const browserZoom = window.devicePixelRatio / _baseDPR;
+  if (Math.abs(browserZoom - 1) > 0.02) {
+    document.documentElement.style.setProperty('--ui-zoom', (1 / browserZoom).toFixed(4));
+  } else {
+    document.documentElement.style.setProperty('--ui-zoom', '1');
+  }
+}
+window.addEventListener('resize', () => requestAnimationFrame(adjustUIZoom));
+adjustUIZoom();
+
 // 为 AI 提供当前阅读上下文
 function getReaderContext() {
   const hash = location.hash;

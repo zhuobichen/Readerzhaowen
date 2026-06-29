@@ -203,19 +203,6 @@ function renderTOCItem(ch, isSub) {
   return `<div class="${cls}" ${dataAttrs}>${escapeHtml(ch.title)}${pageLabel}</div>`;
 }
 
-// 浏览器缩放时, 工具栏和进度条反向缩放保持固定大小
-const _baseDPR = window.devicePixelRatio;
-function adjustUIZoom() {
-  const browserZoom = window.devicePixelRatio / _baseDPR;
-  if (Math.abs(browserZoom - 1) > 0.02) {
-    document.documentElement.style.setProperty('--ui-zoom', (1 / browserZoom).toFixed(4));
-  } else {
-    document.documentElement.style.setProperty('--ui-zoom', '1');
-  }
-}
-window.addEventListener('resize', () => requestAnimationFrame(adjustUIZoom));
-adjustUIZoom();
-
 function bindControls() {
   ui.prev.addEventListener('click', () => active?.prev());
   ui.next.addEventListener('click', () => active?.next());
