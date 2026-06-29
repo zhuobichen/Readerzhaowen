@@ -1157,7 +1157,6 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 /* ============================ AI 悬浮按钮 ============================ */
 .ai-fab {
   position: fixed;
-  zoom: var(--ui-zoom, 1);
   bottom: 24px; right: 24px;
   width: 52px; height: 52px;
   border-radius: 50%;
@@ -1176,7 +1175,6 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 /* ============================ AI 对话面板 ============================ */
 .ai-panel {
   position: fixed;
-  zoom: var(--ui-zoom, 1);
   bottom: 88px; right: 24px;
   width: 380px;
   max-width: calc(100vw - 48px);
