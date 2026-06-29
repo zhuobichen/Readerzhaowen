@@ -251,9 +251,9 @@ function openSettings() {
   el.settingsModal.hidden = false;
 }
 
-/** 根据FAB当前位置定位面板 */
-function syncPanelToFAB() {
-  if (!el.panel || el.panel.hidden || !el.panel.classList.contains('open')) return;
+/** 根据FAB当前位置定位面板（无 guard，无条件定位） */
+function positionPanelToFAB() {
+  if (!el.panel || !el.fab) return;
   const fabRect = el.fab.getBoundingClientRect();
   const panelW = Math.min(380, window.innerWidth - 48);
   let left = fabRect.right - panelW;
@@ -271,9 +271,15 @@ function syncPanelToFAB() {
   }
 }
 
+/** 拖拽时同步移动面板（仅面板已打开时） */
+function syncPanelToFAB() {
+  if (!el.panel || el.panel.hidden || !el.panel.classList.contains('open')) return;
+  positionPanelToFAB();
+}
+
 /** 打开面板 */
 function openPanel() {
-  syncPanelToFAB();
+  positionPanelToFAB();
   el.panel.hidden = false;
   el.fab.classList.add('active');
   requestAnimationFrame(() => el.panel.classList.add('open'));
