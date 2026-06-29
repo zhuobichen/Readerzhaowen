@@ -472,6 +472,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 
 /* ============================ 阅读器 ============================ */
 .reader-bar {
+  zoom: var(--ui-zoom, 1);
   height: var(--readerbar-h);
   flex: 0 0 var(--readerbar-h);
   display: flex;
@@ -594,6 +595,7 @@ code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-el
 
 /* 阅读器底部进度条 */
 .reader-foot {
+  zoom: var(--ui-zoom, 1);
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
