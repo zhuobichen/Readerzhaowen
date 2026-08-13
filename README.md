@@ -61,8 +61,8 @@
 
 ```bash
 # 克隆仓库
-git clone <repo-url>
-cd Readerzhaowen
+git clone https://github.com/zhuobichen/lingtai-reader.git
+cd lingtai-reader
 
 # 启动服务（无需安装任何依赖）
 python server.py
@@ -78,7 +78,7 @@ AI 助手需在设置中填入 API Key 后启用。
 ## 目录结构
 
 ```
-Readerzhaowen/
+lingtai-reader/
 ├── server.py              # 后端服务（单文件）
 ├── static/
 │   ├── index.html         # 单页应用入口
