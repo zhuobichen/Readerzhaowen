@@ -187,7 +187,7 @@ def extract_book_text(path, fmt, max_chars=8000):
             with open(path, "rb") as f:
                 raw = f.read()
             text = raw.decode("utf-8", errors="replace")
-            if "\ufffd" in text * 10:
+            if "\ufffd" in text:
                 try:
                     text = raw.decode("gbk", errors="replace")
                 except Exception:

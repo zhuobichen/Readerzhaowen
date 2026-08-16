@@ -137,7 +137,7 @@ def _tool_download_book(args, context):
             with open(dest, "wb") as f:
                 f.write(data)
             # 自动导入到书架
-            bid = urllib.parse.quote(fname)
+            bid = fname
             lib = load_library()
             meta = lib.setdefault("books", {}).setdefault(bid, {})
             meta["title"] = title or os.path.splitext(fname)[0]
